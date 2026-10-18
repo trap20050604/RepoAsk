@@ -3,6 +3,9 @@
 Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete (small experiment + minimal
 vertical slice)**. Next stage: 2 (vector index, hybrid retrieval, context management).
 
+Current commit: `9ee1115` — "feat: stage 1 vertical slice (chunking, lexical retrieval,
+verified citations)". Local repository only; nothing has been pushed.
+
 ## Verified in this session
 
 | Check | Command | Result |
@@ -10,7 +13,9 @@ vertical slice)**. Next stage: 2 (vector index, hybrid retrieval, context manage
 | Test suite | `python -m pytest` | **75 passed, 1 skipped** in ~2.5 s |
 | Chunker output | `python -m repoask.cli chunk --repo-root tests/fixtures/demo_repo --path app/service.py` | 8 chunks: 1 text, 1 class, 4 functions, 2 nested |
 | Offline answer | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question "重试逻辑是在哪个函数里实现的？"` | 2/2 citations valid, both compared with source text |
-| Index build | `python -m repoask.cli index --repo-root tests/fixtures/demo_repo --out data/index/demo.jsonl` | 25 chunks from 6 files |
+| Index build | `python -m repoask.cli index --repo-root tests/fixtures/demo_repo --out data/index/demo.jsonl` | 25 chunks from 7 files (2 class, 5 function, 4 method, 3 nested_function, 11 text) |
+| Query a saved index | `python -m repoask.cli ask --index data/index/demo.jsonl --repo-root tests/fixtures/demo_repo --question "配置解析器怎么判断内容为空？"` | 2/2 citations valid, ConfigParser found |
+| No-credential path | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question x --llm` | exits 2 with an explicit "LLM 未配置" message, no crash |
 | Environment probe | `python -m repoask.cli probe` | tree-sitter 0.25.2 / tree-sitter-python 0.25.0, pydantic 2.13.5, openai 3.26.1, LLM unconfigured |
 
 The single skipped test is `test_symlinks_are_never_followed`: creating a symlink needs
