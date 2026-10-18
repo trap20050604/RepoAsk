@@ -14,11 +14,11 @@ dist/
 # Secrets: never commit real configuration
 .env
 
-# Runtime artifacts (indexes, traces, logs) - reproducible, not source
+# Runtime artifacts (indexes, traces, logs) - reproducible, not source.
+# Note: *.jsonl is deliberately NOT ignored globally, because stage 5 must commit
+# evaluation records. Only the runtime directories below are excluded.
 data/
 logs/
-*.jsonl
-!tests/fixtures/**/*.jsonl
 
 # Local scratch
 .tmp-pip/
