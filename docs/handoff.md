@@ -3,8 +3,10 @@
 Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete (small experiment + minimal
 vertical slice)**. Next stage: 2 (vector index, hybrid retrieval, context management).
 
-Current commit: `9ee1115` — "feat: stage 1 vertical slice (chunking, lexical retrieval,
-verified citations)". Local repository only; nothing has been pushed.
+Current commit: `62687b8` — **pushed to `origin/main` on 2026-10-18** (the remote repository
+was empty, so the first push created `main`). The stage-1 feature commit was `9ee1115`;
+later commits added the embedding client, the corrected git diagnosis, the IDE-file cleanup
+and this verification record.
 
 ## Verified in this session
 
