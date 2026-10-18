@@ -114,7 +114,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     try:
         if args.index:
             index = ChunkIndex.load(args.index)
-            file_texts = _load_file_texts(args.repo_root) if args.repo_root else None
+            file_texts = _load_file_texts(args.repo_root, index) if args.repo_root else None
             result = ask(
                 index,
                 args.question,
@@ -179,22 +179,15 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load_file_texts(root: str) -> dict[str, str]:
-    base = Path(root).resolve()
-    texts: dict[str, str] = {}
-    for path in sorted(base.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(base).as_posix()
-        if any(part.startswith(".") for part in rel.split("/")):
-            continue
-        if language_for_path(rel) is None:
-            continue
-        try:
-            texts[rel] = decode_source(path.read_bytes())[0]
-        except OSError:
-            continue
-    return texts
+def _load_file_texts(root: str, index: ChunkIndex) -> dict[str, str]:
+    """Load indexed source text for citation checks via the safe ingestion path.
+
+    Reading the tree with ``rglob`` here would bypass ingestion limits and could
+    follow a symlink out of the repository, so verification reuses the scanner.
+    """
+    from repoask.pipeline import load_indexed_source_texts
+
+    return load_indexed_source_texts(root, index)
 
 
 def _cmd_probe(_: argparse.Namespace) -> int:

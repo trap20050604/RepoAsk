@@ -34,12 +34,26 @@ class DroppedCandidate(BaseModel):
     reason: str
 
 
+class TruncatedEvidence(BaseModel):
+    """An evidence block that had to be shortened to fit the character budget."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    path: str
+    start_line: int
+    end_line: int
+    shown_lines: int
+    omitted_lines: int
+
+
 class ContextBundle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     evidence: list[Evidence] = Field(default_factory=list)
     rendered: str = ""
     dropped: list[DroppedCandidate] = Field(default_factory=list)
+    truncated: list[TruncatedEvidence] = Field(default_factory=list)
     used_chars: int = 0
 
     @property
@@ -51,8 +65,12 @@ def _contains(outer: Chunk, inner: Chunk) -> bool:
     return outer.start_line <= inner.start_line and inner.end_line <= outer.end_line
 
 
-def render_evidence_block(evidence: Evidence) -> str:
-    """Render one evidence block with original line numbers on the left."""
+def _block_parts(evidence: Evidence) -> tuple[list[str], list[str]]:
+    """Split an evidence block into the fixed header lines and the numbered code.
+
+    Separating them lets the budgeted renderer drop trailing code lines while
+    keeping the header (id, path, line range) and every shown line number intact.
+    """
     header = (
         f"[{evidence.evidence_id}] {evidence.path}:"
         f"{evidence.start_line}-{evidence.end_line}"
@@ -70,9 +88,58 @@ def render_evidence_block(evidence: Evidence) -> str:
         )
         for offset, text in enumerate(parent.content.split("\n")):
             lines.append(f"{parent.start_line + offset:>5}| {text}")
-    for offset, text in enumerate(evidence.content.split("\n")):
-        lines.append(f"{evidence.start_line + offset:>5}| {text}")
-    return "\n".join(lines)
+    code = [
+        f"{evidence.start_line + offset:>5}| {text}"
+        for offset, text in enumerate(evidence.content.split("\n"))
+    ]
+    return lines, code
+
+
+def render_evidence_block(evidence: Evidence) -> str:
+    """Render one evidence block with original line numbers on the left."""
+    header, code = _block_parts(evidence)
+    return "\n".join(header + code)
+
+
+def render_evidence_block_fitted(
+    evidence: Evidence, max_chars: int
+) -> tuple[str | None, int, int]:
+    """Render one block no longer than ``max_chars``.
+
+    Returns ``(text, shown_lines, omitted_lines)``, or ``(None, 0, total)`` when
+    even the header plus the truncation marker cannot fit, in which case the
+    caller must drop the candidate instead of exceeding the budget.
+    """
+    header, code = _block_parts(evidence)
+    full = "\n".join(header + code)
+    if len(full) <= max_chars:
+        return full, len(code), 0
+
+    kept: list[str] = []
+    for line in code:
+        kept.append(line)
+        remaining = len(code) - len(kept)
+        marker = f"... ({remaining} lines omitted by budget)" if remaining else ""
+        candidate = "\n".join(header + kept + ([marker] if marker else []))
+        if len(candidate) > max_chars:
+            kept.pop()
+            break
+
+    remaining = len(code) - len(kept)
+    if remaining:
+        marker = f"... ({remaining} lines omitted by budget)"
+        text = "\n".join(header + kept + [marker])
+    else:  # pragma: no cover - only reachable with a huge header
+        text = "\n".join(header + kept)
+    if len(text) > max_chars:
+        return None, 0, len(code)
+    return text, len(kept), remaining
+
+
+def render_evidence_block(evidence: Evidence) -> str:
+    """Render one evidence block with original line numbers on the left."""
+    header, code = _block_parts(evidence)
+    return "\n".join(header + code)
 
 
 def render_context(evidence: list[Evidence]) -> str:
@@ -167,9 +234,12 @@ def build_context(
             parent_context=chunk.parent_context if budget.include_parent_context else None,
             url=url,
         )
-        block = render_evidence_block(candidate)
-        addition = len(block) + (2 if bundle.rendered else 0)
-        if bundle.used_chars + addition > budget.max_chars and bundle.evidence:
+        # Charge the block against what is already rendered, including the "\n\n"
+        # separator. The remaining allowance is what this block may occupy, so a
+        # single oversized first block is truncated instead of silently accepted.
+        separator = 2 if bundle.rendered else 0
+        available = budget.max_chars - len(bundle.rendered) - separator
+        if available <= 0:
             bundle.dropped.append(
                 DroppedCandidate(
                     chunk_id=chunk.chunk_id,
@@ -180,9 +250,34 @@ def build_context(
                 )
             )
             continue
+        text, shown, omitted = render_evidence_block_fitted(candidate, available)
+        # A block reduced to "header + N lines omitted" shows no code at all, so
+        # citing it would point at lines the model never saw. Drop it instead.
+        if text is None or (omitted and shown == 0):
+            bundle.dropped.append(
+                DroppedCandidate(
+                    chunk_id=chunk.chunk_id,
+                    path=chunk.path,
+                    start_line=chunk.start_line,
+                    end_line=chunk.end_line,
+                    reason="budget",
+                )
+            )
+            continue
+        if omitted:
+            bundle.truncated.append(
+                TruncatedEvidence(
+                    evidence_id=candidate.evidence_id,
+                    path=candidate.path,
+                    start_line=candidate.start_line,
+                    end_line=candidate.end_line,
+                    shown_lines=shown,
+                    omitted_lines=omitted,
+                )
+            )
         selected.append(chunk)
         bundle.evidence.append(candidate)
-        bundle.used_chars += addition
+        bundle.rendered = f"{bundle.rendered}\n\n{text}" if bundle.rendered else text
 
-    bundle.rendered = render_context(bundle.evidence)
+    bundle.used_chars = len(bundle.rendered)
     return bundle

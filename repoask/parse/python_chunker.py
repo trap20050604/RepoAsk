@@ -45,6 +45,9 @@ _DECORATED = "decorated_definition"
 # definition" search must look for both forms or a decorated first method would
 # make the class header cover the entire class body.
 _DEF_OR_DECORATED = _DEF_TYPES | {_DECORATED}
+# Nodes that can never contain a nested definition; skipping them keeps the
+# control-flow descent cheap (a def cannot appear inside a string or expression).
+_NON_CONTAINER_TYPES = frozenset({"string", "comment", "expression_statement"})
 
 ContainerKind = Literal["module", "class", "function"]
 
@@ -52,12 +55,13 @@ _DEF_LINE = re.compile(r"^(?:async\s+def|def|class)\s")
 
 
 def decode_python_source(raw: bytes) -> tuple[str, str]:
-    """Decode source bytes and normalise CRLF to LF.
+    """Decode source bytes and normalise line endings to LF.
 
-    Only the line terminator is normalised: it cannot change tree-sitter's row
-    count, so line numbers still match the file on disk. Undecodable bytes fall
-    back to latin-1 (never fails), and the chosen encoding is recorded so a
-    reviewer can see the file was not read as UTF-8.
+    Both CRLF and a bare CR are treated as line terminators, matching Python's
+    universal-newline reading and what an editor shows. Only line terminators are
+    rewritten: a bare-CR file would otherwise collapse into one tree-sitter row,
+    so every chunk after the first would report line 1. Undecodable bytes fall
+    back to latin-1 (never fails), and the chosen encoding is recorded.
     """
     encoding = "utf-8"
     if raw.startswith(codecs.BOM_UTF8):
@@ -69,7 +73,7 @@ def decode_python_source(raw: bytes) -> tuple[str, str]:
         except UnicodeDecodeError:
             text = raw.decode("latin-1")
             encoding = "latin-1"
-    return text.replace("\r\n", "\n"), encoding
+    return text.replace("\r\n", "\n").replace("\r", "\n"), encoding
 
 
 def _identifier(node: Node) -> str:
@@ -226,6 +230,19 @@ class _Emitter:
             elif child.type in _DEF_TYPES:
                 def_node, outer = child, child
             else:
+                # A definition can be nested inside control flow:
+                #   def outer(): if flag: def inner(): ...
+                #   if flag: def cond(): ...          (module level)
+                # Keep descending with the current scope so those definitions
+                # still get their own chunk instead of only appearing inside the
+                # parent body.
+                if child.child_count and child.type not in _NON_CONTAINER_TYPES:
+                    self._walk(
+                        child,
+                        scope=scope,
+                        container_sig=container_sig,
+                        container_kind=container_kind,
+                    )
                 continue
             self._emit_definition(
                 def_node,
@@ -337,6 +354,60 @@ class _Emitter:
             )
 
 
+def _bracket_balance(line: str) -> int:
+    """Net bracket count on one line, ignoring brackets inside strings/comments."""
+    balance = 0
+    quote: str | None = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote is not None:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "#":
+            break
+        elif char in "([{":
+            balance += 1
+        elif char in ")]}":
+            balance -= 1
+        index += 1
+    return balance
+
+
+def _decorator_group_start(lines: list[str], def_row: int) -> int:
+    """First row of the decorator group belonging to the definition at ``def_row``.
+
+    Walks backwards over blank/comment lines and over complete decorator
+    statements, including multi-line decorators: the scan climbs to the top of a
+    logical statement by matching bracket balance, so ``@route(\\n  "/x",\\n)`` is
+    recognised as one decorator instead of stopping at its closing paren.
+    """
+    start = def_row
+    row = def_row - 1
+    while row >= 0:
+        stripped = lines[row].strip()
+        if not stripped or stripped.startswith("#"):
+            row -= 1
+            continue
+        top = row
+        balance = _bracket_balance(lines[top])
+        while balance != 0 and top > 0:
+            top -= 1
+            balance += _bracket_balance(lines[top])
+        if not lines[top].lstrip().startswith("@"):
+            break
+        start = top
+        row = top - 1
+    return start
+
+
 def _definition_group_starts(lines: list[str]) -> list[int]:
     """Rows at column 0 that begin a definition, pulling in its decorators.
 
@@ -350,18 +421,7 @@ def _definition_group_starts(lines: list[str]) -> list[int]:
             continue
         if not _DEF_LINE.match(line):
             continue
-        start = row
-        probe = row - 1
-        while probe >= 0:
-            candidate = lines[probe]
-            if not candidate.strip():
-                break
-            if candidate.startswith("@"):
-                start = probe
-                probe -= 1
-                continue
-            break
-        starts.add(start)
+        starts.add(_decorator_group_start(lines, row))
     return sorted(starts)
 
 

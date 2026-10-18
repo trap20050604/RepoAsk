@@ -62,6 +62,11 @@ file_texts (for citation checks)                ▼
 rows `[a, b]` must satisfy `content == "\n".join(lines[a:b+1])`. Tests assert this for
 every chunk of every fixture file, including a file with a syntax error.
 
+Line endings are normalised before parsing: CRLF **and a bare CR** both become LF, matching
+Python's universal-newline reading. Without the bare-CR rule an old-Mac file collapses into
+one tree-sitter row and every chunk after the first reports line 1 (review finding 7).
+Limitation: for a CR-only file, GitHub's blob line anchors may disagree with ours.
+
 Consequences: chunk text is always one contiguous slice; enclosing signatures are stored
 in a separate `parent_context` field with their own line numbers, so they can be shown
 without breaking contiguity.
@@ -76,6 +81,13 @@ without breaking contiguity.
 | class | header region: `class ...` up to the line before its first nested definition | `class` |
 | anything left over (imports, docstrings, `if __name__`) | filled in by a coverage pass | `text` |
 
+Definitions are found by descending through **control-flow nodes** as well, keeping the
+current scope: `def outer(): if flag: def inner()` yields `outer.inner` (kind
+`nested_function`, parent `outer`), and a module-level `if flag: def cond()` yields `cond`.
+Without that descent such definitions only existed inside the parent body and could not be
+found by symbol (review finding 3). Descent skips strings, comments and expression
+statements, where a definition cannot appear.
+
 A class chunk never repeats its methods, so method code is indexed once. Nested functions
 *are* duplicated (present in the parent body and as their own chunk) because parent bodies
 answer "how does this flow work" questions; `build_context` drops nested overlap at
@@ -89,9 +101,14 @@ Large blocks are split by line windows with overlap; each part records `part_ind
 tree-sitter is error tolerant, but one unclosed bracket can make it swallow the rest of
 the file into a single `ERROR` node (verified with `app/broken.py`). When the top-level
 walk recovers no definitions at all, the chunker re-parses the file as independent
-top-level blocks (column-0 `def`/`class`, decorators pulled in) and keeps the blocks that
-parse cleanly, shifting their line numbers to absolute values. The broken block stays as
-`text` and is flagged `has_syntax_error`. Recovery is one level deep only.
+top-level blocks and keeps the blocks that parse cleanly, shifting their line numbers to
+absolute values. The broken block stays as `text` and is flagged `has_syntax_error`.
+Recovery is one level deep only.
+
+A block starts at the definition's **first decorator**, not at `def`: the scan walks back
+over blank lines, comment lines and complete decorator statements, climbing to the top of
+a logical statement by bracket balance so a multi-line decorator is recognised as one
+unit. Missing this put `@app.route(...)` into the error text block (review finding 4).
 
 ### 4. Retrieval is lexical in stage 1
 
@@ -113,7 +130,18 @@ scores (stage 2).
 path is relative and safe, the range is valid, the content matches its hash, and — when
 source text is supplied — the cited lines equal the real file text. It cannot prove the
 evidence supports the conclusion; that needs human review or the stage 5 harness. The two
-are reported separately.
+are reported separately, and `source_checked_count` makes "compared with real source"
+visible instead of implying it.
+
+Source text for that comparison is loaded with `pipeline.load_indexed_source_texts`, which
+reuses the safe scanner and only reads paths that are both in the index and indexable, so
+verification cannot follow a symlink out of the repository or read a skipped cache file
+(review finding 2).
+
+A failed citation check triggers at most one repair, adopted only when it is strictly
+usable — every citation valid, or an explicit "insufficient evidence" answer with no
+citations. Comparing valid *counts* would accept 1/2 → 1/3 as an improvement (review
+finding 6).
 
 ### 6. Two answerers, one interface
 
@@ -127,16 +155,37 @@ The system prompt states that repository content is data, not instructions.
 ### 7. Version binding
 
 Every chunk carries `repo_id` + `commit`; `ChunkIndex.assert_version` refuses cross-version
-use; retrieval filters on both. For a directory that is not a git work tree the version is
-a content digest labelled `worktree_digest` — explicitly not a git commit.
+use; retrieval filters on both.
+
+A git work tree is labelled with its HEAD **only when HEAD describes the bytes that were
+indexed**. `inspect_git_worktree` asks git for the porcelain status and keeps only entries
+that touch indexable files; any modification or untracked source file means the working
+tree no longer matches the commit. In that case the version is a content digest labelled
+`worktree_digest`, while `git_head` and `worktree_dirty` preserve the provenance. Otherwise
+two different contents could share one commit id and citations could point at lines that do
+not exist in that commit (review finding 1). A plain non-git directory behaves the same way.
+
+### 8. The context budget is a real bound
+
+`build_context` charges each block against `len(rendered)`, including the `"\n\n"`
+separator, and renders each candidate to the remaining allowance. A block that does not fit
+is truncated at a line boundary, keeping its header, its real line numbers and a
+`... (N lines omitted by budget)` marker, and the truncation is recorded in
+`bundle.truncated` and surfaced in `AnswerResult.notes`. If a block cannot show at least one
+code line it is dropped instead of cited, so a citation never points at code the model did
+not see. Before this rule the first block was accepted however large it was and separators
+were undercounted (review finding 5).
 
 ## Failure semantics
 
 - Per-file problems never abort a build: they are recorded in `index.skipped` with a reason.
 - Repository-level limits (files, total bytes, elapsed time) raise `IngestLimitExceeded`.
+- Ingestion accepts repository-relative paths only: `read_bytes_checked` rejects absolute
+  forms even when they resolve inside the root, and symlinks are never followed.
 - Chat failures raise `LLMUnavailable` with attempt count; no silent empty answers.
 - No evidence produces `termination_reason="no_evidence"` and the answer "不足以判断".
 - A citation that fails validation is reported with a machine-readable issue code.
+- Context truncation and dropped candidates are always recorded, never silent.
 
 ## Not built yet
 

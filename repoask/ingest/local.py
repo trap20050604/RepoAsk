@@ -120,27 +120,81 @@ def _is_binary(head: bytes) -> bool:
     return b"\x00" in head
 
 
-def resolve_git_commit(root: Path, timeout_seconds: float = 10.0) -> str | None:
-    """Return the HEAD commit of ``root`` when it is exactly a git work tree root.
+class GitWorktreeState(BaseModel):
+    """Git identity of a directory plus whether the scanned bytes match HEAD.
+
+    ``dirty`` is True when HEAD does not describe the files we would index, i.e.
+    a tracked indexable file is modified/staged, or an indexable file is
+    untracked. In that situation HEAD must not be used as the version label.
+    """
+
+    head: str
+    dirty: bool
+    dirty_entries: list[str] = Field(default_factory=list)
+
+
+def is_indexable_path(rel_path: str) -> bool:
+    """Would :func:`scan_repository` consider this repository-relative path?"""
+    normalized = rel_path.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts:
+        return False
+    if any(part in IGNORED_DIRECTORIES for part in parts[:-1]):
+        return False
+    name = parts[-1]
+    if name.startswith(".") and name not in {".gitignore", ".env.example"}:
+        return False
+    if Path(name).suffix.lower() in IGNORED_SUFFIXES:
+        return False
+    return language_for_path(normalized) is not None
+
+
+def _porcelain_path(entry: str) -> str:
+    """Extract the path from one ``git status --porcelain`` line."""
+    path = entry[3:] if len(entry) > 3 else ""
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip().strip('"')
+
+
+def _run_git(args: list[str], root: Path, timeout_seconds: float) -> str:
+    """Run git and return raw stdout.
+
+    Output is deliberately *not* stripped: ``git status --porcelain`` encodes the
+    staged/worktree state in the first two columns, and a modified-but-unstaged
+    entry starts with a space (``" M a.py"``). Stripping it would shift the path
+    and quietly disable dirty-worktree detection.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=True,
+    )
+    return result.stdout
+
+
+def inspect_git_worktree(root: Path, timeout_seconds: float = 10.0) -> GitWorktreeState | None:
+    """Return git identity for ``root`` when it is exactly a work tree root.
 
     A sub-directory of a git repository is *not* accepted: labelling files with a
     commit that belongs to a parent repository would be misleading.
     """
     try:
-        top_level = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=True,
-        ).stdout.strip()
-        head = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=True,
-        ).stdout.strip()
+        top_level = _run_git(["rev-parse", "--show-toplevel"], root, timeout_seconds).strip()
+        head = _run_git(["rev-parse", "HEAD"], root, timeout_seconds).strip()
+        status = _run_git(
+            [
+                "-c",
+                "core.quotepath=false",
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
+            root,
+            timeout_seconds,
+        )
     except (OSError, subprocess.SubprocessError):
         return None
     if not head or not top_level:
@@ -150,7 +204,19 @@ def resolve_git_commit(root: Path, timeout_seconds: float = 10.0) -> str | None:
             return None
     except OSError:
         return None
-    return head
+    entries = [line for line in status.splitlines() if line.strip()]
+    # Only changes that touch files we would actually index can invalidate HEAD.
+    # Untracked tooling files (.env, .idea, caches) must not force a fallback.
+    relevant = [entry for entry in entries if is_indexable_path(_porcelain_path(entry))]
+    return GitWorktreeState(head=head, dirty=bool(relevant), dirty_entries=relevant[:10])
+
+
+def resolve_git_commit(root: Path, timeout_seconds: float = 10.0) -> str | None:
+    """HEAD of a clean work tree root, or ``None`` when unknown or dirty."""
+    state = inspect_git_worktree(root, timeout_seconds)
+    if state is None or state.dirty:
+        return None
+    return state.head
 
 
 def ensure_within_root(root: Path, candidate: Path) -> Path:
@@ -248,8 +314,20 @@ def scan_repository(root: str | Path, limits: IngestLimits | None = None) -> Sca
 
 
 def read_bytes_checked(root: Path, rel_path: str) -> bytes:
-    """Read one scanned file, refusing any path that escapes ``root``."""
-    if rel_path.startswith("/") or rel_path.startswith("\\") or ".." in Path(rel_path).parts:
+    """Read one scanned file, accepting only a repository-relative path.
+
+    An absolute path is rejected even when it happens to resolve inside ``root``:
+    callers pass repository-relative paths, and accepting absolute forms silently
+    widens the contract that ingestion promises.
+    """
+    candidate = Path(rel_path)
+    if (
+        candidate.is_absolute()
+        or candidate.drive
+        or rel_path.startswith("/")
+        or rel_path.startswith("\\")
+        or ".." in candidate.parts
+    ):
         raise UnsafePathError(f"unsafe relative path: {rel_path}")
     target = ensure_within_root(root, root / rel_path)
     if not target.is_file():

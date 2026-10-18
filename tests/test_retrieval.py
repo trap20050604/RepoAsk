@@ -120,7 +120,8 @@ def test_context_drops_foreign_version() -> None:
     assert bundle.dropped[0].reason == "version_mismatch"
 
 
-def test_context_respects_budget_but_always_keeps_one_item() -> None:
+def test_context_keeps_one_item_within_budget_and_truncates_it() -> None:
+    """A single oversized hit is truncated, never accepted over the budget."""
     big = make_chunk("\n".join(f"x = {index}" for index in range(60)), start_line=1)
     other = make_chunk("\n".join(f"y = {index}" for index in range(60)), start_line=100)
     bundle = build_context(
@@ -130,6 +131,8 @@ def test_context_respects_budget_but_always_keeps_one_item() -> None:
         budget=ContextBudget(max_chars=200, max_items=5),
     )
     assert len(bundle.evidence) == 1
+    assert len(bundle.rendered) <= 200
+    assert bundle.truncated and bundle.truncated[0].omitted_lines > 0
     assert bundle.dropped[0].reason == "budget"
 
 

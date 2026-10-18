@@ -1,27 +1,55 @@
 # Handoff — current state
 
-Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete (small experiment + minimal
-vertical slice)**. Next stage: 2 (vector index, hybrid retrieval, context management).
+Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete + independent review round 1
+addressed**. Next stage: 2 (vector index, hybrid retrieval, context management).
 
-Current commit: `62687b8` — **pushed to `origin/main` on 2026-10-18** (the remote repository
-was empty, so the first push created `main`). The stage-1 feature commit was `9ee1115`;
-later commits added the embedding client, the corrected git diagnosis, the IDE-file cleanup
-and this verification record.
+Current commit: see the review-disposition commit below (the hash is recorded in the commit
+that follows the fixes; `git log -1` is authoritative). `62687b8` was the reviewed baseline.
+Everything is pushed to `origin/main`.
 
-## Verified in this session
+## Verified after the review round (2026-10-18)
 
 | Check | Command | Result |
 | --- | --- | --- |
-| Test suite | `python -m pytest` | **75 passed, 1 skipped** in ~2.5 s |
+| Test suite | `python -m pytest` | **92 passed, 2 skipped** in ~3.7 s |
+| Review reproductions | `python -m pytest tests/test_review_fixes.py -q` | 16 passed, 1 skipped |
+| Budget enforcement | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question "load_tasks 做了什么？" --max-chars 400` | context ≤ 400 chars, truncation reported in notes |
+| Dirty-worktree labelling | `python -m pytest tests/test_review_fixes.py -k dirty` | HEAD not used when indexable files are modified/untracked |
 | Chunker output | `python -m repoask.cli chunk --repo-root tests/fixtures/demo_repo --path app/service.py` | 8 chunks: 1 text, 1 class, 4 functions, 2 nested |
 | Offline answer | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question "重试逻辑是在哪个函数里实现的？"` | 2/2 citations valid, both compared with source text |
 | Index build | `python -m repoask.cli index --repo-root tests/fixtures/demo_repo --out data/index/demo.jsonl` | 25 chunks from 7 files (2 class, 5 function, 4 method, 3 nested_function, 11 text) |
 | Query a saved index | `python -m repoask.cli ask --index data/index/demo.jsonl --repo-root tests/fixtures/demo_repo --question "配置解析器怎么判断内容为空？"` | 2/2 citations valid, ConfigParser found |
 | No-credential path | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question x --llm` | exits 2 with an explicit "LLM 未配置" message, no crash |
-| Environment probe | `python -m repoask.cli probe` | tree-sitter 0.25.2 / tree-sitter-python 0.25.0, pydantic 2.13.5, openai 3.26.1, LLM unconfigured |
+| Environment probe | `python -m repoask.cli probe` | tree-sitter 0.25.2 / tree-sitter-python 0.25.0, pydantic 2.13.5, openai 3.26.1 |
 
-The single skipped test is `test_symlinks_are_never_followed`: creating a symlink needs
-privileges this shell does not have. It self-skips and is not a passing safety check.
+Two skipped tests: `test_symlinks_are_never_followed` and its review-round variant; creating
+a symlink needs privileges this shell does not have. They self-skip and are not passing
+safety checks.
+
+## Independent review round 1 (baseline `35caa13`): disposition
+
+All eight findings reproduced locally before any change; each now has a failing-first test
+in `tests/test_review_fixes.py`.
+
+| # | Sev | Verdict | Change | Verification |
+| --- | --- | --- | --- | --- |
+| 1 | P1 | 成立 | `inspect_git_worktree` + `ChunkIndex.git_head` / `worktree_dirty`; a dirty tree gets a content digest instead of HEAD | `test_dirty_worktree_is_not_labelled_as_git_head`, `test_untracked_source_also_invalidates_head` |
+| 2 | P1 | 成立 | `pipeline.load_indexed_source_texts` reuses the safe scanner; CLI no longer uses `rglob`/`read_bytes` | `test_index_source_loading_ignores_symlinks_and_unsupported_files`, `..._only_reads_indexed_paths` |
+| 3 | P2 | 成立 | `_walk` descends through control-flow nodes, keeping scope | 3 tests: function/method/module-level conditional definitions |
+| 4 | P2 | 成立（单行装饰器原本正常） | `_decorator_group_start` + bracket-balance scan; blank/comment lines and multi-line decorators included | 5 parametrised cases |
+| 5 | P2 | 成立 | budget charged on the real rendered length incl. separators; oversized block truncated with a marker, or dropped if it cannot show ≥1 line | 3 tests incl. `used_chars == len(rendered)` |
+| 6 | P2 | 成立 | repair adopted only if `all_valid`, or an insufficient answer without citations | `test_revision_with_more_invalid_citations_is_not_adopted` |
+| 7 | P2 | 成立 | decoder normalises bare CR as well as CRLF | `test_bare_cr_line_endings_keep_true_line_numbers` |
+| 8 | P2 | 成立（属契约/纵深防御，未越出根目录） | `read_bytes_checked` rejects absolute and drive-qualified paths before resolving | `test_absolute_path_inside_root_is_rejected` |
+
+Not changed, by decision:
+
+- **Optional improvement** (reviewer's note): when `file_texts` is `None`, `all_valid` can be
+  true with `source_checked_count == 0`. The CLI already prints how many citations were
+  compared with real source, so this is visible; making it a hard failure is deliberately
+  deferred and tracked below.
+- Prior over-fitting and FastAPI concurrency were not claimed as defects by the reviewer and
+  remain out of scope for this round.
 
 ## Environment
 
@@ -87,7 +115,17 @@ existence.
   hand-checked questions — a starting prior, not a validated finding.
 - Nested functions appear twice in the index (parent body + own chunk); context assembly
   drops the nested overlap.
-- Syntax-error recovery is one level deep and heuristic (column-0 `def`/`class`).
+- Syntax-error recovery is one level deep and heuristic: it trusts column-0 `def`/`class`
+  and bracket balance, so exotic formatting (a decorator spanning an f-string, deeply
+  unbalanced lines) can still be mis-grouped.
+- Line endings are normalised (CRLF and bare CR → LF). For a CR-only file, GitHub's blob
+  line anchors may disagree with our line numbers.
+- A budget-truncated evidence block is cited for its full range while the model saw only
+  the first N lines; the truncation is reported in `AnswerResult.notes` and in
+  `bundle.truncated`, but the model cannot know the omitted content.
+- When `file_texts` is `None` (e.g. `ask --index` without `--repo-root`), citations are only
+  proven internally consistent: `all_valid` can be true with `source_checked_count == 0`.
+  The CLI prints that count, but this is a residual trust gap (reviewer's optional item).
 - No call graph, no streaming, no tool loop, no API/UI yet.
 - `Ask` has no timeout budget in stage 1: single-pass only. Budgets arrive in stage 3.
 
@@ -104,13 +142,17 @@ existence.
    in the trace so the stage-5 comparison can show both sides.
 4. Re-run the 5 hand questions and record whether the `{"text": 0.6}` prior is still
    justified once vectors are in play.
+5. Decide the `file_texts is None` policy (hard warning vs. refusing to mark citations
+   valid) when the UI exists, since that is where the caller chooses whether source text is
+   available.
 
 ## Where to read code
 
 - `repoask/parse/python_chunker.py` — `chunk_python_source`, `_Emitter._emit_definition`,
-  `_recover_top_level_blocks`.
-- `repoask/pipeline.py` — `build_local_index`, `ask`.
+  `_decorator_group_start`, `_recover_top_level_blocks`.
+- `repoask/pipeline.py` — `build_local_index`, `load_indexed_source_texts`, `ask`.
 - `repoask/cite/verify.py` — `verify_citations`.
+- `repoask/ingest/local.py` — `inspect_git_worktree`, `read_bytes_checked`.
 
 ## Exercise for the project owner
 

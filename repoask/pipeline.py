@@ -23,6 +23,7 @@ from repoask.errors import ParseError
 from repoask.index import ChunkIndex, EmbeddingInfo, SkippedFile, utc_now_iso
 from repoask.ingest.local import (
     IngestLimits,
+    inspect_git_worktree,
     read_bytes_checked,
     resolve_git_commit,
     scan_repository,
@@ -87,14 +88,20 @@ def build_local_index(
         file_texts[scanned.rel_path] = text
         encodings[scanned.rel_path] = encoding
 
+    git_state = inspect_git_worktree(scan.root)
+    git_head = git_state.head if git_state is not None else None
+    worktree_dirty = bool(git_state.dirty) if git_state is not None else False
     if commit:
         resolved_commit, commit_source = commit, "explicit"
+    elif git_state is not None and not git_state.dirty:
+        resolved_commit, commit_source = git_state.head, "git"
     else:
-        git_commit = resolve_git_commit(scan.root)
-        if git_commit:
-            resolved_commit, commit_source = git_commit, "git"
-        else:
-            resolved_commit, commit_source = compute_worktree_commit(file_texts), "worktree_digest"
+        # Either not a git work tree, or HEAD does not describe the bytes we just
+        # read (modified/untracked indexable files). Labelling this as HEAD would
+        # let two different contents share one commit id, so use a content digest
+        # and keep HEAD only as provenance.
+        resolved_commit = compute_worktree_commit(file_texts)
+        commit_source = "worktree_digest"
 
     chunks: list[Chunk] = []
     skipped: list[tuple[str, str]] = list(scan.skipped)
@@ -127,6 +134,8 @@ def build_local_index(
         commit=resolved_commit,
         source="local",
         commit_source=commit_source,  # type: ignore[arg-type]
+        git_head=git_head,
+        worktree_dirty=worktree_dirty,
         repo_url=normalized_url,
         created_at=utc_now_iso(),
         chunks=chunks,
@@ -146,6 +155,30 @@ def build_local_index(
         },
     )
     return LocalBuild(index=index, file_texts=file_texts, skipped=skipped)
+
+
+def load_indexed_source_texts(
+    root: str | Path,
+    index: ChunkIndex,
+    *,
+    limits: IngestLimits | None = None,
+) -> dict[str, str]:
+    """Load source text for citation checks, under the same safety boundary.
+
+    Only paths that are both *in the index* and *scanned safely* are read, so
+    verification cannot reach a symlink target outside the repository or a cache
+    directory that ingestion deliberately skips. Files added after indexing are
+    ignored; index paths missing from the scan stay unverified (and are reported
+    as ``source_unavailable`` by the citation check).
+    """
+    scan = scan_repository(root, limits)
+    available = {item.rel_path for item in scan.files}
+    wanted = sorted({chunk.path for chunk in index.chunks} & available)
+    texts: dict[str, str] = {}
+    for rel_path in wanted:
+        raw = read_bytes_checked(scan.root, rel_path)
+        texts[rel_path], _ = decode_source(raw)
+    return texts
 
 
 def _citation_problems(report) -> list[str]:
@@ -249,7 +282,13 @@ def ask(
             repo_url=index.repo_url,
             file_texts=file_texts,
         )
-        if revised_report.valid_count >= report.valid_count:
+        # A repair may only be adopted when it is strictly usable: every citation
+        # valid, or an explicit "insufficient evidence" answer without citations.
+        # Comparing counts alone would accept 1/2 -> 1/3 as an "improvement".
+        revised_usable = revised_report.all_valid or (
+            revised.insufficient_evidence and not revised_report.answer_has_citation
+        )
+        if revised_usable:
             draft = revised
             report = revised_report
             notes.append("引用检查失败后执行了一次修正。")
@@ -265,6 +304,12 @@ def ask(
         )
     if report.uncited_evidence_ids:
         notes.append(f"未使用的证据：{', '.join(report.uncited_evidence_ids)}")
+    if bundle.truncated:
+        for truncated in bundle.truncated:
+            notes.append(
+                f"证据 {truncated.evidence_id} 因预算只展示前 {truncated.shown_lines} 行，"
+                f"另有 {truncated.omitted_lines} 行未进入上下文。"
+            )
     if bundle.dropped:
         reasons = sorted({dropped.reason for dropped in bundle.dropped})
         notes.append(f"上下文丢弃了 {len(bundle.dropped)} 条候选（原因：{', '.join(reasons)}）")

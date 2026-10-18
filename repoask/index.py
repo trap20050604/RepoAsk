@@ -46,6 +46,10 @@ class ChunkIndex(BaseModel):
     commit: str
     source: Literal["local", "github"] = "local"
     commit_source: Literal["git", "worktree_digest", "explicit"] = "explicit"
+    # Present for a git work tree even when its content differs from HEAD; this is
+    # what makes a dirty work tree visible instead of silently mislabelled as HEAD.
+    git_head: str | None = None
+    worktree_dirty: bool = False
     repo_url: str | None = None
     created_at: str
     chunks: list[Chunk] = Field(default_factory=list)
@@ -76,6 +80,8 @@ class ChunkIndex(BaseModel):
             "repo_id": self.repo_id,
             "commit": self.commit,
             "commit_source": self.commit_source,
+            "git_head": self.git_head,
+            "worktree_dirty": self.worktree_dirty,
             "repo_url": self.repo_url,
             "chunks": self.chunk_count,
             "files": len({chunk.path for chunk in self.chunks}),
