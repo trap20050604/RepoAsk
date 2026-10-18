@@ -3,9 +3,10 @@
 Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete + independent review round 1
 addressed**. Next stage: 2 (vector index, hybrid retrieval, context management).
 
-Current commit: see the review-disposition commit below (the hash is recorded in the commit
-that follows the fixes; `git log -1` is authoritative). `62687b8` was the reviewed baseline.
-Everything is pushed to `origin/main`.
+Current commit: `1015470` — "fix: address independent review round 1 (8 findings, P1 x2,
+P2 x6)", pushed to `origin/main`. The reviewed baseline was `35caa13`. The stage-1 feature
+commit was `9ee1115`; later commits added the embedding client, the corrected git diagnosis,
+the IDE-file cleanup and this review disposition.
 
 ## Verified after the review round (2026-10-18)
 
