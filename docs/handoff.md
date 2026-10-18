@@ -3,10 +3,11 @@
 Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete + independent review round 1
 addressed**. Next stage: 2 (vector index, hybrid retrieval, context management).
 
-Current commit: `1015470` — "fix: address independent review round 1 (8 findings, P1 x2,
-P2 x6)". The reviewed baseline was `35caa13`. The stage-1 feature commit was `9ee1115`;
-later commits added the embedding client, the corrected git diagnosis, the IDE-file cleanup
-and this review disposition.
+Functional fix commit: `1015470` — "fix: address independent review round 1 (8 findings,
+P1 x2, P2 x6)"; documentation-only commits follow it, so use `git log -1` for the tip.
+Reviewed baseline: `35caa13`. The stage-1 feature commit was `9ee1115`; later commits added
+the embedding client, the corrected git diagnosis, the IDE-file cleanup and this review
+disposition. Reviewers only need the diff `35caa13..1015470`.
 
 **Push state (must be read before trusting the remote):** the fixes are **committed locally
 but not pushed**. `origin/main` still points at `35caa13`. The push attempt at 2026-10-18
