@@ -35,5 +35,9 @@ class LLMUnavailable(RepoAskError):
     """The chat model is not configured, or the endpoint failed."""
 
 
+class EmbeddingUnavailable(RepoAskError):
+    """The embedding model is not configured, or the endpoint failed."""
+
+
 class CitationError(RepoAskError):
     """A citation could not be resolved to real evidence."""

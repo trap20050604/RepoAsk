@@ -210,19 +210,44 @@ def _cmd_probe(_: argparse.Namespace) -> int:
     print("\n配置（已脱敏）:")
     for key, value in settings.safe_summary().items():
         print(f"  {key}: {value}")
+
+    failures = 0
+
+    print("\nEmbedding 探针:")
+    if not settings.embedding_configured:
+        print("  未配置，跳过。")
+    else:
+        from repoask.embed.client import EmbeddingClient
+
+        probe = EmbeddingClient(settings).probe()
+        if probe.ok:
+            print(f"  ok model={probe.model} 实际维度={probe.returned_dimensions} "
+                  f"配置维度={probe.configured_dimensions} "
+                  f"耗时={probe.latency_ms}ms tokens={probe.prompt_tokens}")
+            if probe.configured_dimensions and (
+                probe.returned_dimensions != probe.configured_dimensions
+            ):
+                print("  警告：实际维度与配置不一致")
+                failures += 1
+        else:
+            print(f"  failed: {probe.detail}")
+            failures += 1
+
+    print("\n聊天模型探针:")
     if not settings.llm_configured:
-        print("\nLLM 未配置：跳过在线探针。离线基线仍可使用。")
-        return 0
+        print("  未配置，跳过。离线基线仍可使用。")
+        return 1 if failures else 0
     from repoask.answer.llm import ChatClient
 
     report = ChatClient(settings).probe()
-    print("\n在线能力探针:")
     for name in ("basic_call", "usage_reported", "tool_call", "streaming"):
         step = getattr(report, name)
         print(f"  {name}: {step.status} {step.detail or ''}")
+        if step.status == "failed":
+            failures += 1
     for note in report.notes:
         print(f"  note: {note}")
-    return 0 if report.basic_call.status == "ok" else 1
+    return 1 if failures else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

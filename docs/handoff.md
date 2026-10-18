@@ -36,16 +36,22 @@ privileges this shell does not have. It self-skips and is not a passing safety c
    `EMBEDDING_*` are all unset. Therefore: the `LLMAnswerer` path, the live capability
    probe (basic call, tool call, streaming) and every model-quality statement are
    **unverified**. Only the stubbed client tests ran. Do not report model results yet.
-2. **GitHub is not reachable from `git` on this machine.**
-   - `git ls-remote https://github.com/trap20050604/RepoAsk` →
-     `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`
-   - same with `-c http.sslBackend=openssl` → `Recv failure: Connection was reset`
-   - Python `urllib` to `https://api.github.com` returns `HTTP 403 rate limit exceeded`,
-     and `https://pypi.org/simple/` returns 200, so general HTTPS egress works; the
-     failure is specific to git-over-HTTPS to GitHub.
-   - Consequence: the existence of the remote repository is **unconfirmed**, nothing was
-     pushed, and stage 4's GitHub import must plan for this (HTTPS archive or API download
-     with an explicit fallback) instead of assuming `git clone` works.
+2. **git 可用——此前的"git 不可用"结论是错的，已更正（2026-10-18 16:40）。**
+   - 早先 `git ls-remote https://github.com/trap20050604/RepoAsk` 失败于
+     `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`，
+     换成 `-c http.sslBackend=openssl` 则变成 `Recv failure: Connection was reset`。
+   - 真实原因是**当时进程运行在沙箱受限令牌下**：Windows schannel 在该令牌中无法获取 TLS
+     凭据，openssl 后端的连接也被拦断。这不是机器或 git 安装的故障。
+   - 沙箱放宽为完全访问后复测：
+     `git clone --depth 1 --single-branch https://github.com/pallets/flask` **成功，2 秒**，
+     `HEAD=d086db856be187255b8ec61ef409357393020f32`，与 `git ls-remote` 一致；
+     `git ls-remote` 返回 `exit 0`。结论：**阶段 4 可以正常使用 `git clone`**。
+     教训：环境受限时得到的"某工具坏了"结论，必须在权限变化后复测再写进文档。
+   - 仍然成立的两条事实：
+     - 远端仓库 `https://github.com/trap20050604/RepoAsk` **是空仓库**（页面含
+       "This repository is empty"，`ls-remote` 无 refs）。首次推送会创建 `main`。
+     - 无 token 的 GitHub API 会被限流（403，共享出口 IP `3.112.217.125`）。clone 不需要
+       token；若阶段 4 要用 API 取元数据，需要只读 token 作为可选增强。
 3. **This machine has broken directory permissions in two places.**
    - `E:\RepoAsk` denied `WRITE_OWNER`; repaired for the current user. Backup and rollback
      script: `E:\RepoAsk-acl-recovery\acl-backup-8c2feff960ec43ce9005a772a8d68d4a.*`,
