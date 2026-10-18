@@ -26,16 +26,33 @@ privileges this shell does not have. It self-skips and is not a passing safety c
 - Interpreter `D:\anaconda\envs\trap\python.exe`, Python 3.11.16 (Windows 10.0.26100).
   `python` on PATH is an unrelated 3.8 install; always use the full path.
 - Installed for this project, nothing else changed:
-  `tree-sitter==0.25.2`, `tree-sitter-python==0.25.0`.
+  `tree-sitter==0.25.2`, `tree-sitter-python==0.25.0`, `qdrant-client==1.19.1`
+  (plus its own dependencies: h2, hpack, hyperframe, portalocker, pywin32).
   Note: `tree-sitter-python` has **no 0.25.1 release** (verified against the USTC mirror:
   available versions end at 0.25.0).
 
+## Verified model and storage capabilities (2026-10-18, real calls)
+
+| Capability | Endpoint / model | Measured result |
+| --- | --- | --- |
+| Chat basic call | `deepseek-chat` @ `api.deepseek.com/v1` | ok, reply `pong` |
+| Chat usage reporting | same | ok, token usage returned |
+| Chat **tool calling** | same | ok, 1 tool call returned |
+| Chat streaming | same | ok, 16 chunks / 14 chars |
+| Embedding | `qwen3.7-text-embedding-flash` @ DashScope compatible-mode | ok, **1024 dimensions** (matches config), 1906 ms, 23 prompt tokens |
+| Qdrant local mode | `qdrant-client==1.19.1`, `path=` persistence | create / upsert / payload filter / reopen all pass |
+
+Two API facts to remember from the Qdrant probe: local mode has **no `search` method**
+(use `query_points`), and `create_payload_index` is a documented no-op locally (it emits a
+warning), so filtering correctness must be tested by result inspection, not by index
+existence.
+
 ## Blockers and unverified items
 
-1. **No chat/embedding credentials.** `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` /
-   `EMBEDDING_*` are all unset. Therefore: the `LLMAnswerer` path, the live capability
-   probe (basic call, tool call, streaming) and every model-quality statement are
-   **unverified**. Only the stubbed client tests ran. Do not report model results yet.
+1. **Credentials are now configured and verified (2026-10-18).** Chat and embedding were
+   both probed with real calls (table above). Still unverified by design: model *answer
+   quality* (no evaluation yet), the LangGraph tool loop integration (stage 3), and
+   embedding cost/latency at repository scale.
 2. **git 可用——此前的"git 不可用"结论是错的，已更正（2026-10-18 16:40）。**
    - 早先 `git ls-remote https://github.com/trap20050604/RepoAsk` 失败于
      `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`，
@@ -74,12 +91,17 @@ privileges this shell does not have. It self-skips and is not a passing safety c
 
 ## Next steps (stage 2)
 
-1. Verify the embedding endpoint for real, record model + dimensions in
-   `ChunkIndex.embedding`, and refuse to reuse an index built with different embeddings.
-2. Add Qdrant local persistence with payload filters on `repo_id` + `commit`.
-3. Fuse keyword and vector results with **RRF over ranks**; keep the per-retriever scores
-   visible in the trace for the later comparison.
-4. Re-run the 5 hand questions and record whether the kind prior is still justified.
+1. ~~Verify the embedding endpoint for real~~ **done**: 1024 dims confirmed; the client
+   already fails loudly on a dimension mismatch. Remaining: persist model + dimensions in
+   `ChunkIndex.embedding` and refuse to reuse an index built with different embeddings.
+2. Write `repoask/vector/store.py` around `QdrantClient(path=...)`: collection per embed
+   model, deterministic point ids, payload filters on `repo_id` + `commit`, and a
+   `delete_version(repo_id, commit)` for re-imports. Use `query_points` (local mode has no
+   `search`).
+3. Fuse keyword and vector results with **RRF over ranks**; keep each retriever's own score
+   in the trace so the stage-5 comparison can show both sides.
+4. Re-run the 5 hand questions and record whether the `{"text": 0.6}` prior is still
+   justified once vectors are in play.
 
 ## Where to read code
 

@@ -14,6 +14,10 @@ dependencies = [
     "tree-sitter==0.25.2",
     "tree-sitter-python==0.25.0",
     "openai>=1.30",
+    # Local persistence mode verified on 2026-10-18: create/upsert/payload-filter/
+    # reopen all work; local mode has no `search` method (use query_points) and
+    # payload indexes are documented as having no effect locally.
+    "qdrant-client==1.19.1",
 ]
 
 [project.optional-dependencies]
