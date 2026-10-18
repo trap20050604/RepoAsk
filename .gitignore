@@ -24,3 +24,8 @@ logs/
 .tmp-pip/
 .venv/
 venv/
+
+# IDE project files (user-local, not project source)
+.idea/
+.vscode/
+
