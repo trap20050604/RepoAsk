@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repoask"
+version = "0.1.0"
+description = "Ask source-level questions against a fixed commit of a public repository."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6,<3",
+    # Pinned pair verified on 2026-10-18 in env trap (Python 3.11.16, Windows).
+    # tree-sitter-python has no 0.25.1 release; latest compatible is 0.25.0.
+    "tree-sitter==0.25.2",
+    "tree-sitter-python==0.25.0",
+    "openai>=1.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["repoask*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning"]

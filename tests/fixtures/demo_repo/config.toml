@@ -1,0 +1,8 @@
+# 演示配置：不要用于生产
+
+[server]
+port = 8080
+timeout = 30
+
+[limits]
+max_tasks = 100
