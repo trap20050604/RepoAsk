@@ -4,9 +4,17 @@ Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete + independent revi
 addressed**. Next stage: 2 (vector index, hybrid retrieval, context management).
 
 Current commit: `1015470` — "fix: address independent review round 1 (8 findings, P1 x2,
-P2 x6)", pushed to `origin/main`. The reviewed baseline was `35caa13`. The stage-1 feature
-commit was `9ee1115`; later commits added the embedding client, the corrected git diagnosis,
-the IDE-file cleanup and this review disposition.
+P2 x6)". The reviewed baseline was `35caa13`. The stage-1 feature commit was `9ee1115`;
+later commits added the embedding client, the corrected git diagnosis, the IDE-file cleanup
+and this review disposition.
+
+**Push state (must be read before trusting the remote):** the fixes are **committed locally
+but not pushed**. `origin/main` still points at `35caa13`. The push attempt at 2026-10-18
+17:5x failed with `Recv failure: Connection was reset`, then `Failed to connect to
+github.com port 443` (curl also timed out after 21 s), although the same push succeeded at
+17:0x — so this is intermittent GitHub connectivity, not a repository problem. When the
+network is back, `git push origin main` publishes the review fixes; no history rewrite is
+needed.
 
 ## Verified after the review round (2026-10-18)
 
