@@ -9,13 +9,16 @@ Reviewed baseline: `35caa13`. The stage-1 feature commit was `9ee1115`; later co
 the embedding client, the corrected git diagnosis, the IDE-file cleanup and this review
 disposition. Reviewers only need the diff `35caa13..1015470`.
 
-**Push state (must be read before trusting the remote):** the fixes are **committed locally
-but not pushed**. `origin/main` still points at `35caa13`. The push attempt at 2026-10-18
-17:5x failed with `Recv failure: Connection was reset`, then `Failed to connect to
-github.com port 443` (curl also timed out after 21 s), although the same push succeeded at
-17:0x — so this is intermittent GitHub connectivity, not a repository problem. When the
-network is back, `git push origin main` publishes the review fixes; no history rewrite is
-needed.
+**Push state:** pushed successfully at 2026-10-18 17:48 (`35caa13..5356401`). `origin/main`
+and local `main` now point at the same tip, verified two ways: `git ls-remote origin
+refs/heads/main` and the GitHub commits page (which shows `1015470` and its subject line).
+
+Context for later readers: pushes at 17:4x failed with `Recv failure: Connection was reset`
+or `Failed to connect to github.com port 443`, while `curl https://github.com` simultaneously
+returned 200 — GitHub connectivity from this network is intermittent, not broken. Retrying
+`git push` was sufficient, and no history rewrite was needed. The docs-only commit `816affa`
+still contains the words "push is blocked"; that message is historical and superseded by
+this note.
 
 ## Verified after the review round (2026-10-18)
 
