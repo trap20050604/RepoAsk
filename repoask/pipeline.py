@@ -336,7 +336,10 @@ def ask(
         )
         logger.record(
             "done",
-            elapsed_ms=elapsed_ms,
+            # NOT ``elapsed_ms``: that name is the logger's own column (time since
+            # the run started) and passing the pipeline duration under the same
+            # key silently overwrote it, producing non-monotonic traces.
+            pipeline_elapsed_ms=elapsed_ms,
             usage=draft.usage.model_dump() if draft.usage else "unavailable",
         )
 

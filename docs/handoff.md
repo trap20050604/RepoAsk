@@ -1,7 +1,11 @@
 # Handoff — current state
 
-Last updated: 2026-10-18 (Asia/Shanghai). Stage: **1 complete + independent review round 1
+Last updated: 2026-10-19 (Asia/Shanghai). Stage: **1 complete + independent review round 1
 addressed**. Next stage: 2 (vector index, hybrid retrieval, context management).
+
+**Stage report (module-9 format): [`docs/reports/stage-1.md`](reports/stage-1.md)** — what the
+user can do, which modules changed, request flow, trade-offs, verification, reading list and
+exercises. One report per stage; chat summaries are not the deliverable.
 
 Functional fix commit: `1015470` — "fix: address independent review round 1 (8 findings,
 P1 x2, P2 x6)"; documentation-only commits follow it, so use `git log -1` for the tip.
@@ -25,7 +29,7 @@ this note.
 | Check | Command | Result |
 | --- | --- | --- |
 | Test suite | `python -m pytest` | **92 passed, 2 skipped** in ~3.7 s |
-| Review reproductions | `python -m pytest tests/test_review_fixes.py -q` | 16 passed, 1 skipped |
+| Review reproductions | `python -m pytest tests/test_review_fixes.py -q` | 18 passed, 1 skipped |
 | Budget enforcement | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question "load_tasks 做了什么？" --max-chars 400` | context ≤ 400 chars, truncation reported in notes |
 | Dirty-worktree labelling | `python -m pytest tests/test_review_fixes.py -k dirty` | HEAD not used when indexable files are modified/untracked |
 | Chunker output | `python -m repoask.cli chunk --repo-root tests/fixtures/demo_repo --path app/service.py` | 8 chunks: 1 text, 1 class, 4 functions, 2 nested |
@@ -38,6 +42,15 @@ this note.
 Two skipped tests: `test_symlinks_are_never_followed` and its review-round variant; creating
 a symlink needs privileges this shell does not have. They self-skip and are not passing
 safety checks.
+
+Extra defect found while writing the stage report (2026-10-19): the `done` trace event passed
+`elapsed_ms` as a payload field, which overwrote the logger's own elapsed column and produced
+a non-monotonic trace (1 ms after 83 ms). Renamed to `pipeline_elapsed_ms`; the e2e test now
+asserts monotonic `elapsed_ms` and the presence of `pipeline_elapsed_ms`.
+
+Untracked by design: `docs/learning-guide.zh-CN.md` (the project owner's 83 KB study guide)
+exists in the working tree, was not created or modified by this work, and is **not**
+committed. Decide whether to track it separately.
 
 ## Independent review round 1 (baseline `35caa13`): disposition
 

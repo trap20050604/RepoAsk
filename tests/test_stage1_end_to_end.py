@@ -110,6 +110,12 @@ def test_run_log_records_every_stage_without_credentials(build, tmp_path: Path) 
     assert entries[0]["matches"], "search step should record its matches"
     assert entries[3]["checked"] >= 1
     assert "sk-" not in log_path.read_text(encoding="utf-8")
+    # ``elapsed_ms`` is the logger's own monotonic column; a payload field must
+    # never overwrite it (that produced 1 ms after 79 ms in an earlier trace).
+    stamps = [entry["elapsed_ms"] for entry in entries]
+    assert stamps == sorted(stamps), "trace timestamps must be monotonic"
+    assert "pipeline_elapsed_ms" in entries[-1]
+    assert entries[-1]["pipeline_elapsed_ms"] >= 0
 
 
 def test_ask_local_builds_and_answers_in_one_call() -> None:
