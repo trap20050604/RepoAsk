@@ -7,7 +7,7 @@
 | 当前提交 | 本次提交（见 `git log -1`） |
 | 撰写日期 | 2026-10-19（Asia/Shanghai） |
 | 验证环境 | Windows 10.0.26100，`D:\anaconda\envs\trap\python.exe`（Python 3.11.16） |
-| 测试结果 | **118 个用例：116 passed，2 skipped** |
+| 测试结果 | **126 个用例：124 passed，2 skipped** |
 | 一句话结论 | 索引可以“带向量”构建；向量集合按“模型 + 维度”隔离、按“仓库 + commit”强制过滤；关键词与向量用 **RRF 按排名融合**，三路共用同一套上下文与引用校验。对照观察显示混合检索在本夹具上没有改变 top-1（也未变差），**不对检索质量下结论** |
 
 阶段 2 **不做**：重排、GitHub 导入、API/UI、固定题库与正式评测（阶段 5）。
@@ -80,6 +80,7 @@ vectors: {'path': 'E:\\RepoAsk\\data\\vectors', 'collection': 'repoask_qwen3_7_t
 | `eval/runs/stage2-observation.jsonl`（新增） | 15 条原始记录 | 5 题 × 3 种方式 |
 | `tests/test_vector_store.py`（新增） | 11 个用例 | 桩向量，离线；含混合链路 |
 | `tests/test_fusion.py`（新增） | 8 个用例 | RRF 数学、合并、权重、边界 |
+| `tests/test_review2_fixes.py`（新增） | 8 个用例 | 第二轮审查 4 项缺陷的复现与回归 |
 | `tests/test_httpcompat.py`（新增） | 5 个用例 | 复现并锁定 NO_PROXY 故障 |
 
 ---
@@ -138,7 +139,7 @@ CLI._cmd_ask
 
 | 取舍 | 原因 | 代价 | 何时重估 |
 | --- | --- | --- | --- |
-| 集合名由“模型 + 维度”派生 | 物理隔离，旧向量不可能被新模型误用 | 换模型后需要重建索引（不能增量迁移） | 若将来要支持模型迁移，再写显式迁移脚本 |
+| 集合名由“模型 + 维度 + 模型哈希”派生 | 只靠 slug 会撞名（`org/model` vs `org-model`、长名截断），撞名会让后建模型覆盖前一个模型的点 | 换模型后需要重建索引（不能增量迁移） | 若将来要支持模型迁移，再写显式迁移脚本 |
 | 打开集合时校验维度 | 维度不符时余弦相似度会“算得出来但没意义” | 多一次集合元数据读取 | 无需重估 |
 | 写入/检索都强制 `repo_id + commit` | 同一集合可放多版本，但绝不串版本 | 每个查询多两个过滤条件 | 无需重估 |
 | 向量库只存标识与分数，正文回取索引 | 单一事实来源，避免两处内容不一致 | 检索后要多一次内存映射 | 无需重估 |
@@ -165,10 +166,10 @@ CLI._cmd_ask
 
 ```powershell
 & 'D:\anaconda\envs\trap\python.exe' -m pytest
-# 116 passed, 2 skipped in 6.81s
+# 124 passed, 2 skipped in 7.44s
 ```
 
-新增用例：`test_vector_store.py` 11 个（版本过滤、跨版本写入拒绝、维度不符拒绝、换模型换集合、删除版本、命中映射回索引、模型不一致拒绝、无向量索引拒绝、向量/融合结果的证据来源标注），`test_fusion.py` 8 个（RRF 数学、去重合并、排序、权重、空输入、参数校验、来源统计），`test_httpcompat.py` 5 个。
+新增用例：`test_vector_store.py` 11 个（版本过滤、跨版本写入拒绝、维度不符拒绝、换模型换集合、删除版本、命中映射回索引、模型不一致拒绝、无向量索引拒绝、向量/融合结果的证据来源标注），`test_fusion.py` 8 个（RRF 数学、去重合并、排序、权重、空输入、参数校验、来源统计），`test_httpcompat.py` 5 个，`test_review2_fixes.py` 8 个（第二轮审查缺陷回归）。
 
 ### 5.2 真实构建（一次真实 embedding 调用）
 
@@ -238,6 +239,22 @@ embedding_ms: 1182    embedding_tokens: 1467    vectors: 25    build_ms: 77
 ```powershell
 & 'D:\anaconda\envs\trap\python.exe' -m pytest tests/test_httpcompat.py -v   # 5 passed
 ```
+
+### 5.6 第二轮独立审查的四项修复（同日稍后）
+
+审查基线 `c989711`，4 项均为“约束没有真正被强制”，全部先复现再修复，
+回归测试在 `tests/test_review2_fixes.py`（8 个用例）：
+
+| 问题 | 修复 |
+| --- | --- |
+| 集合名只靠 slug，`org/model` 与 `org-model` 撞名 → 跨模型覆盖向量 | 集合名追加完整模型标识的哈希；写入前统计“其他模型写入的点”并拒绝混写 |
+| 同版本重新分块后旧点残留，占满候选导致假空检索 | 重建前先删除该版本旧点；查询多取候选（`max(3×top_k, top_k+10)`） |
+| 权重置 0 时该路候选仍以 0 分进入结果 | 遍历前跳过权重 ≤ 0 的通道，不贡献候选/名次/来源统计 |
+| 查询缺失向量库/集合时静默建空库并返回 [] | 查询改为只读打开（`create=False`），缺失即报错并提示重建 |
+
+**注意**：5.2 节记录的构建输出（集合名 `repoask_qwen3_7_text_embedding_flash_1024`）是
+修复**之前**的真实记录，因此没有哈希后缀。旧索引仍可查询（它记录的是集合名，旧集合也还在），
+但用新代码重建会得到带哈希的新集合；正式使用前建议统一重建。
 
 ---
 

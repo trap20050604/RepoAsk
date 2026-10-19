@@ -38,6 +38,11 @@ def fuse_rrf(
 
     merged: dict[str, dict[str, object]] = {}
     for source, hits in (("keyword", keyword_hits), ("vector", vector_hits)):
+        weight = merged_weights.get(source, 1.0)
+        # 权重 <= 0 表示“这一路不参与”：不贡献候选、名次与来源统计。
+        # 只在累加时乘 0 会让该路的独占候选以 0 分留在结果里，等于没移除。
+        if weight <= 0:
+            continue
         for rank, hit in enumerate(hits, start=1):
             chunk_id = hit.chunk.chunk_id
             entry = merged.get(chunk_id)
@@ -50,7 +55,7 @@ def fuse_rrf(
                     "terms": [],
                 }
                 merged[chunk_id] = entry
-            entry["score"] = float(entry["score"]) + merged_weights.get(source, 1.0) / (k + rank)
+            entry["score"] = float(entry["score"]) + weight / (k + rank)
             ranks: dict[str, int] = entry["ranks"]  # type: ignore[assignment]
             scores: dict[str, float] = entry["scores"]  # type: ignore[assignment]
             ranks[source] = rank

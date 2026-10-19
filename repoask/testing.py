@@ -6,10 +6,51 @@ module contains no production logic.
 
 from __future__ import annotations
 
+import hashlib
+import math
+import time
+
+from repoask.embed.client import EmbeddingResponse
 from repoask.models import Chunk, Evidence, ParentContext, content_sha256
+from repoask.retrieve.keyword import tokenize
 
 DEFAULT_REPO_ID = "demo-repo"
 DEFAULT_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+class StubEmbedder:
+    """确定性桩向量：把 token 哈希到固定维度，共享 token 越多相似度越高。
+
+    它不是语义模型，只用于离线测试向量链路的接线与约束；排序结果没有质量含义。
+    """
+
+    def __init__(self, model: str = "stub-embedding-v1", dimensions: int = 16) -> None:
+        self.model = model
+        self.dimensions = dimensions
+
+    def embed(self, texts: list[str]) -> EmbeddingResponse:
+        started = time.perf_counter()
+        vectors = [self._vector(text) for text in texts]
+        return EmbeddingResponse(
+            vectors=vectors,
+            model=self.model,
+            dimensions=self.dimensions,
+            prompt_tokens=None,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+
+    def _vector(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimensions
+        for token in tokenize(text):
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            slot = digest[0] % self.dimensions
+            sign = 1.0 if digest[1] % 2 == 0 else -1.0
+            vector[slot] += sign
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm == 0.0:
+            vector[0] = 1.0
+            norm = 1.0
+        return [value / norm for value in vector]
 
 
 def make_chunk(

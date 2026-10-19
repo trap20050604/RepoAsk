@@ -55,19 +55,20 @@
 ## 测试
 
 ```
-python -m pytest   →   116 passed, 2 skipped in 6.81s
+python -m pytest   →   124 passed, 2 skipped in 7.44s
 ```
 
 | 测试文件 | 用例数 | 覆盖 |
 | --- | --- | --- |
 | `test_python_chunker.py` | 14 | 行号不变式、覆盖完整、装饰器、嵌套、类边界、语法错误恢复、切分、编码与换行 |
-| `test_review_fixes.py` | 18 | 独立审查 8 项缺陷的回归 |
+| `test_review_fixes.py` | 18 | 独立审查第 1 轮 8 项缺陷的回归 |
 | `test_citation_verify.py` | 13 | 引用校验各失败分支、URL 构造、输入校验 |
 | `test_vector_store.py` | 11 | 向量写入/检索的版本隔离、维度校验、集合隔离、命中映射、向量/融合证据来源 |
 | `test_ingest_local.py` | 10 | 跳过规则、上限、符号链接、路径越界 |
 | `test_retrieval.py` | 10 | 分词、符号命中、版本隔离、去重、预算、渲染 |
 | `test_llm_client.py` | 9 | 重试、超时、usage 缺失、修正采纳规则（桩，无网络） |
 | `test_fusion.py` | 8 | RRF 数学、去重合并、排序、权重、空输入、参数校验、来源统计 |
+| `test_review2_fixes.py` | 8 | 独立审查第 2 轮 4 项缺陷的回归（集合撞名/旧点残留/零权重/查询建库） |
 | `test_stage1_end_to_end.py` | 8 | 端到端、版本绑定、轨迹事件、缺配置分支 |
 | `test_config_and_logging.py` | 7 | `.env` 解析、密钥脱敏、日志截断 |
 | `test_httpcompat.py` | 5 | `NO_PROXY` 方括号 IPv6 导致 httpx 崩溃 |
@@ -98,6 +99,26 @@ python -m pytest   →   116 passed, 2 skipped in 6.81s
 
 未采纳：审查者列为“可选改进”的 `file_texts=None` 时 `all_valid` 但未核对源码，
 当前以 `source_checked_count=0` 明示，是否升级为硬失败留待阶段 4 的调用方设计。
+
+## 独立审查第 2 轮处置（基线 `c989711`）
+
+4 项全部先复现、再修复，回归测试在 `tests/test_review2_fixes.py`（8 个用例）。
+
+| # | 级别 | 判断 | 改动 |
+| --- | --- | --- | --- |
+| 1 | P1 | 成立 | 集合名追加完整模型标识的哈希（`repoask_<slug>_<维度>_<sha256 前 8 位>`）；`upsert_chunks` 写入前统计“其他模型写入的点”，有则拒绝，做第二道防线 |
+| 2 | P2 | 成立 | 同版本重建前先 `delete_version` 清掉该版本旧点；向量查询多取候选（`max(3×top_k, top_k+10)`）并在映射后截断，避免旧点造成假空 |
+| 3 | P2 | 成立 | `fuse_rrf` 在遍历该路前跳过权重 ≤ 0 的通道：不贡献候选、名次与来源统计 |
+| 4 | P2 | 成立 | `VectorStore(create=False)` 用于查询：缺目录或缺集合直接抛 `VectorStoreError`，不建库、不写盘 |
+
+影响与代价（如实记录）：
+
+- 集合命名规则变了。**旧索引仍可查询**，因为它记录的是集合名（`data/index/vector.jsonl`
+  指向旧名，旧集合仍在 `data/vectors`）；但用新代码重建会得到带哈希的新集合，
+  旧集合需要手动清理或忽略。上线（阶段 4）应统一重建。
+- 查询变成**只读**：向量库被误删时不再“返回空证据”，而是明确报错并要求重建。
+- 同版本重建会先删后写：如果两人同时重建同一版本，后写者覆盖前者的分块集合
+  （本地单进程锁本身也不允许并发打开）。
 
 ## 本轮另外修掉的两个缺陷
 

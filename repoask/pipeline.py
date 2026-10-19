@@ -196,6 +196,10 @@ def _attach_vectors(
     with VectorStore(
         vector_path, collection=collection, dimensions=response.dimensions
     ) as store:
+        # 同一版本重新分块（窗口变小）会产生新的 chunk_id，旧点不会被覆盖。
+        # 旧点会占据查询候选并被“映射回索引”这一步丢弃，表现为假空结果，
+        # 因此写入前先清掉该版本的全部旧点：同一版本只保留一份当前分块。
+        store.delete_version(repo_id=index.repo_id, commit=index.commit)
         store.upsert_chunks(
             index.chunks,
             response.vectors,
@@ -239,14 +243,20 @@ def search_vector(
             "向量空间不同，请重建索引"
         )
     store_path = vector_path or index.vectors.path
+    # 查询只读：create=False，缺目录/缺集合直接报错，不静默建空库。
     with VectorStore(
-        store_path, collection=index.vectors.collection, dimensions=response.dimensions
+        store_path,
+        collection=index.vectors.collection,
+        dimensions=response.dimensions,
+        create=False,
     ) as store:
+        # 多取一些候选：历史索引可能残留不在当前分块里的点，它们会在下面被
+        # 映射丢弃，若只取 top_k 就会表现为“命中变少”甚至假空。
         raw_hits = store.search(
             response.vectors[0],
             repo_id=index.repo_id,
             commit=index.commit,
-            top_k=top_k,
+            top_k=max(top_k * 3, top_k + 10),
         )
     by_id = {chunk.chunk_id: chunk for chunk in index.chunks}
     hits: list[SearchHit] = []
@@ -258,6 +268,8 @@ def search_vector(
         hits.append(
             SearchHit(chunk=chunk, score=raw.score, matched_terms=[], source="vector")
         )
+        if len(hits) >= top_k:
+            break
     return hits
 
 

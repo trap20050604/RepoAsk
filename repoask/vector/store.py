@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from pathlib import Path
@@ -31,9 +32,17 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def collection_name(model: str, dimensions: int) -> str:
-    """由模型名与维度派生的集合名，保证不同模型不会共用集合。"""
-    slug = _SLUG_RE.sub("_", (model or "unknown").lower()).strip("_")[:40] or "unknown"
-    return f"{COLLECTION_PREFIX}_{slug}_{int(dimensions)}"
+    """由模型名与维度派生的集合名。
+
+    只靠 slug 不够：``org/model`` 与 ``org-model`` 会得到同一个 slug，长模型名
+    截断后也会碰撞。碰撞意味着两个模型写入同一集合、共享同一批点 id，
+    后建的模型会**覆盖**前一个模型的向量，而旧索引的模型检查仍然通过。
+    因此在 slug 后附加完整模型标识的稳定哈希。
+    """
+    identity = model or "unknown"
+    slug = _SLUG_RE.sub("_", identity.lower()).strip("_")[:40] or "unknown"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+    return f"{COLLECTION_PREFIX}_{slug}_{int(dimensions)}_{digest}"
 
 
 def point_id(chunk_id: str) -> str:
@@ -68,21 +77,38 @@ def _vector_size(info: object) -> int:
 class VectorStore:
     """一个集合的读写封装；用完必须 ``close()``（本地模式会持有目录锁）。"""
 
-    def __init__(self, path: str | Path, *, collection: str, dimensions: int) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        collection: str,
+        dimensions: int,
+        create: bool = True,
+    ) -> None:
+        """打开一个集合。
+
+        ``create=False`` 用于查询路径：目录或集合缺失时直接报错，绝不顺手建库。
+        否则“存储缺失”会被静默解释成“没有证据”，而且查询会写磁盘。
+        """
         if dimensions <= 0:
             raise VectorStoreError("向量维度必须为正数")
         self.path = Path(path).resolve()
-        self.path.mkdir(parents=True, exist_ok=True)
+        if create:
+            self.path.mkdir(parents=True, exist_ok=True)
+        elif not self.path.is_dir():
+            raise VectorStoreError(
+                f"向量库目录不存在：{self.path}；请先用 index --embed 重建索引"
+            )
         self.collection = collection
         self.dimensions = int(dimensions)
         self._client = QdrantClient(path=str(self.path))
         try:
-            self._ensure_collection()
+            self._ensure_collection(create=create)
         except Exception:
             self._client.close()
             raise
 
-    def _ensure_collection(self) -> None:
+    def _ensure_collection(self, *, create: bool) -> None:
         if self._client.collection_exists(self.collection):
             existing = _vector_size(self._client.get_collection(self.collection))
             if existing != self.dimensions:
@@ -91,6 +117,10 @@ class VectorStore:
                     f"与当前要求的 {self.dimensions} 维不一致；请重建索引"
                 )
             return
+        if not create:
+            raise VectorStoreError(
+                f"集合 {self.collection!r} 不存在于 {self.path}；请先用 index --embed 重建索引"
+            )
         self._client.create_collection(
             collection_name=self.collection,
             vectors_config=models.VectorParams(
@@ -109,11 +139,30 @@ class VectorStore:
         model: str,
         batch_size: int = 128,
     ) -> int:
-        """写入一批分块向量；拒绝混入其他版本，拒绝维度不符。"""
+        """写入一批分块向量；拒绝混入其他版本、其他模型或维度不符。"""
         if len(chunks) != len(vectors):
             raise VectorStoreError(
                 f"分块数 {len(chunks)} 与向量数 {len(vectors)} 不一致"
             )
+        # 防御纵深：即使集合名被复用，也不允许两个模型的点混在一个集合里。
+        if self.count() > 0:
+            foreign = self._client.count(
+                collection_name=self.collection,
+                count_filter=models.Filter(
+                    must_not=[
+                        models.FieldCondition(
+                            key="embedding_model",
+                            match=models.MatchValue(value=model),
+                        )
+                    ]
+                ),
+                exact=True,
+            ).count
+            if foreign:
+                raise VectorStoreError(
+                    f"集合 {self.collection!r} 中已有 {foreign} 个由其他模型写入的点；"
+                    "拒绝与新模型混写，请使用独立集合"
+                )
         points: list[models.PointStruct] = []
         for chunk, vector in zip(chunks, vectors):
             if len(vector) != self.dimensions:
