@@ -106,9 +106,12 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_ask(args: argparse.Namespace) -> int:
     settings = Settings.load()
-    if args.vectors and not args.index:
+    if args.vectors and args.hybrid:
+        print("--vectors 与 --hybrid 只能选一个。", file=sys.stderr)
+        return 2
+    if (args.vectors or args.hybrid) and not args.index:
         print(
-            "--vectors 需要配合 --index 使用：先用 index --embed 构建带向量的索引。",
+            "--vectors/--hybrid 需要配合 --index 使用：先用 index --embed 构建带向量的索引。",
             file=sys.stderr,
         )
         return 2
@@ -138,24 +141,42 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             index = ChunkIndex.load(args.index)
             file_texts = _load_file_texts(args.repo_root, index) if args.repo_root else None
             precomputed = None
-            if args.vectors:
+            if args.vectors or args.hybrid:
                 if not settings.embedding_configured:
                     print(
-                        "向量检索需要 EMBEDDING_* 配置，且索引必须用 --embed 构建。",
+                        "向量/混合检索需要 EMBEDDING_* 配置，且索引必须用 --embed 构建。",
                         file=sys.stderr,
                     )
                     return 2
                 from repoask.embed.client import EmbeddingClient
                 from repoask.pipeline import search_vector
 
-                precomputed = search_vector(
-                    index,
-                    args.question,
-                    EmbeddingClient(settings),
-                    top_k=args.top_k,
-                )
+                embedder = EmbeddingClient(settings)
+                if args.hybrid:
+                    from repoask.retrieve.fusion import describe_fusion, fuse_rrf
+                    from repoask.retrieve.keyword import DEFAULT_KIND_WEIGHTS, KeywordIndex
+
+                    # 两路各多取一些候选再融合，避免只看到很窄的头部。
+                    candidate_k = max(args.top_k * 2, 10)
+                    keyword_hits = KeywordIndex(
+                        index.chunks,
+                        repo_id=index.repo_id,
+                        commit=index.commit,
+                        kind_weights=DEFAULT_KIND_WEIGHTS,
+                    ).search(args.question, top_k=candidate_k)
+                    vector_hits = search_vector(
+                        index, args.question, embedder, top_k=candidate_k
+                    )
+                    precomputed = fuse_rrf(keyword_hits, vector_hits, top_k=args.top_k)
+                    # 打 stdout 而不是 stderr：PowerShell 会把原生命令的 stderr 当成
+                    # 错误记录，导致管道退出码变 1，干扰脚本化使用。
+                    print(describe_fusion(precomputed))
+                else:
+                    precomputed = search_vector(
+                        index, args.question, embedder, top_k=args.top_k
+                    )
                 if not precomputed:
-                    print("提示：向量检索没有命中，可能索引未用 --embed 构建。", file=sys.stderr)
+                    print("提示：检索没有命中，可能索引未用 --embed 构建。", file=sys.stderr)
             result = ask(
                 index,
                 args.question,
@@ -325,6 +346,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--vectors",
         action="store_true",
         help="用向量检索代替关键词检索（需 index --embed 建好的索引）",
+    )
+    ask_cmd.add_argument(
+        "--hybrid",
+        action="store_true",
+        help="关键词 + 向量按 RRF 融合（需 index --embed 建好的索引）",
     )
     mode = ask_cmd.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="使用离线抽取式基线（默认）")

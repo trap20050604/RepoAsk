@@ -3,8 +3,8 @@
 针对**一个固定 commit** 的公开仓库回答源码级问题，并给出**程序可核验**的引用：
 文件路径、原始行号、绑定该 commit 的 GitHub 链接。
 
-> 当前进度：阶段 1 完成（含独立审查第 1 轮修复）；阶段 2 增量 1（向量存储）完成。
-> 混合检索（RRF）、LangGraph 工具循环、GitHub 导入、FastAPI、Streamlit、评测题库尚未实现。
+> 当前进度：阶段 1 完成（含独立审查第 1 轮修复）；**阶段 2 完成**（向量索引 + RRF 混合检索）。
+> LangGraph 工具循环、GitHub 导入、FastAPI、Streamlit、正式评测题库尚未实现。
 > 真实验证记录见 [docs/handoff.md](docs/handoff.md)，每阶段交付说明见
 > [docs/reports/](docs/reports/)，稳定设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -44,6 +44,11 @@
     --index data/index/demo.jsonl --repo-root tests/fixtures/demo_repo `
     --question "任务名称里的空白是怎么处理的？" --vectors
 
+# 关键词 + 向量按 RRF 融合
+& 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
+    --index data/index/demo.jsonl --repo-root tests/fixtures/demo_repo `
+    --question "任务名称里的空白是怎么处理的？" --hybrid
+
 # 用真实模型回答（需要 LLM_* 配置）
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
     --repo-root tests/fixtures/demo_repo --question "..." --llm
@@ -76,8 +81,9 @@ scripts/      检索调试脚本
 
 ## 已知限制
 
-- 检索质量**尚无结论**：只有夹具上的少量观察，没有固定题库与对照实验。
-- 中文按二元组切词，常见词（如“时间”）可能误命中无关注释；混合检索用 RRF 融合，尚未实现。
+- 检索质量**尚无结论**：阶段 2 只做了 5 题 × 3 路的观察（混合 top-1 与关键词相同），
+  没有固定题库与对照实验，不能声称任何提升。
+- 中文按二元组切词，常见词（如“时间”）可能误命中无关注释；RRF 的 k 与权重未调参。
 - 不做调用图；动态调用与 `getattr` 一律不解析。
 - 模型回答质量未评测，只验证了接口能力（调用/工具调用/流式/usage）。
 - `ask --index` 未给 `--repo-root` 时，引用只证明内部自洽，不会与真实文件比对。

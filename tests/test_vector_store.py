@@ -229,3 +229,22 @@ def test_ask_accepts_vector_hits_and_labels_evidence(built) -> None:
     assert result.evidence
     assert all(item.source == "vector" for item in result.evidence)
     assert result.citation_report.all_valid
+
+
+def test_ask_with_fused_hits_labels_evidence_hybrid(built) -> None:
+    from repoask.retrieve.fusion import fuse_rrf
+    from repoask.retrieve.keyword import DEFAULT_KIND_WEIGHTS, KeywordIndex
+
+    build, embedder, _ = built
+    keyword_hits = KeywordIndex(
+        build.index.chunks,
+        repo_id=build.index.repo_id,
+        commit=build.index.commit,
+        kind_weights=DEFAULT_KIND_WEIGHTS,
+    ).search("load_tasks", top_k=5)
+    vector_hits = search_vector(build.index, "load_tasks", embedder, top_k=5)
+    fused = fuse_rrf(keyword_hits, vector_hits, top_k=3)
+    result = ask(build.index, "load_tasks", hits=fused, file_texts=build.file_texts)
+    assert result.evidence
+    assert all(item.source == "hybrid" for item in result.evidence)
+    assert result.citation_report.all_valid
