@@ -82,6 +82,15 @@ python -m pytest   →   124 passed, 2 skipped in 7.44s
 由 `scripts/compare_retrieval.py` 生成，真实调用 embedding。结果：混合检索的 top-1 在 5 题上
 全部与关键词相同，其中 2 题与纯向量不同；无法据此声称任何提升。样本 5 题，仅作观察。
 
+**演示索引已按新集合命名重建（2026-10-19 21:0x）**：`data/index/vector.jsonl` 现在指向
+`repoask_qwen3_7_text_embedding_flash_1024_3976579c`（含模型哈希），25 个点对应 25 个分块；
+复跑记录在 `eval/runs/stage2-observation-rebuilt.jsonl`。两次记录的唯一差异是
+`build_tasks` 的向量分数相差约 6e-4、q2 混合结果里一个非头部名次变化——这是
+**embedding 服务对相同输入的两次调用并非逐位相同**，不是代码差异。
+
+**对阶段 5 的影响（重要）**：跨运行比较时不要依赖原始分数或细微名次差异；
+固定模型、固定参数，重复运行同一配置以估计波动，结论只建立在稳定差异上。
+
 ## 独立审查第 1 轮处置（基线 `35caa13`）
 
 8 项全部先复现、再修复，每项都有失败优先的回归测试（`tests/test_review_fixes.py`）。
@@ -141,7 +150,9 @@ python -m pytest   →   124 passed, 2 skipped in 7.44s
 7. 预算裁剪后，模型看到的行少于引用范围（已在说明中标注）。
 8. 向量以绝对路径记录；换机器或换目录需重建索引；本地 Qdrant 单进程持锁。
 9. 裸 CR 文件的行号与 GitHub 行锚点可能不一致（行尾已归一化为 LF）。
-10. GitHub 导入、FastAPI、Streamlit、题库与正式评测均未实现。
+10. **embedding 非确定性**：同一段代码两次调用返回的向量并非逐位相同（实测余弦分差约 6e-4），
+    因此跨运行比较原始分数不可靠；阶段 5 需固定配置并先测重复性。
+11. GitHub 导入、FastAPI、Streamlit、题库与正式评测均未实现。
 
 ## 下一步（阶段 3）
 
