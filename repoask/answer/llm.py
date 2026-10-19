@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict
 
 from repoask.config import Settings
 from repoask.errors import LLMUnavailable
+from repoask.httpcompat import sanitize_no_proxy
 from repoask.models import Usage
 
 RETRYABLE_ERROR_NAMES = frozenset(
@@ -105,9 +106,13 @@ class ChatClient:
         self._last_usage: Usage | None = None
         if client is not None:
             self._client = client
+            self.sanitized_no_proxy: list[str] = []
         else:
             from openai import OpenAI  # imported lazily so offline tests need no network
 
+            # 与 embedding 客户端同样的兼容处理：NO_PROXY 中的 [::1] 会让 httpx
+            # 在构造阶段抛 InvalidURL。
+            self.sanitized_no_proxy = sanitize_no_proxy()
             self._client = OpenAI(
                 api_key=settings.llm_api_key,
                 base_url=settings.llm_base_url,
@@ -162,6 +167,11 @@ class ChatClient:
         failed, never assumed to work because the endpoint says "compatible".
         """
         notes: list[str] = []
+        if self.sanitized_no_proxy:
+            notes.append(
+                "已从 NO_PROXY 移除 httpx 不兼容的方括号 IPv6 条目："
+                + ", ".join(self.sanitized_no_proxy)
+            )
         basic = self._probe_basic(notes)
         usage_step = (
             ProbeStep(status="ok", detail="provider returned token usage")

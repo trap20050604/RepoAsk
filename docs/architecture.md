@@ -1,194 +1,168 @@
-# RepoAsk architecture
+# RepoAsk 架构
 
-Stable description of how the system is put together. Progress and open issues live
-in [handoff.md](handoff.md).
+本文件描述**稳定的设计决策**与不变量。进度、测试、已知问题与提交号见
+[handoff.md](handoff.md)；每个阶段的交付说明见 `docs/reports/stage-N.md`。
 
-## Purpose
+## 目的
 
-Answer questions about a Python repository at a **fixed commit**, citing file paths and
-original line numbers that a program can verify. Code and docs from the analysed
-repository are treated as untrusted data, never as instructions.
+针对一个**固定 commit** 的 Python 仓库回答源码问题，并给出程序可核验的文件路径、
+原始行号与链接。被分析仓库中的代码与文档一律视为**数据**，不是指令。
 
-## Request flow (stage 1)
+## 请求流程
 
 ```
-local repo
-   │  ingest/local.scan_repository      read-only walk, limits, skip reasons
-   ▼
-decoded text  ── parse/chunk_source ──▶ chunks (original lines + line ranges)
-   │                                            │
-   │                                            ▼
-   │                                    index.ChunkIndex  (repo_id + commit bound)
-   ▼                                            │
-file_texts (for citation checks)                ▼
-                                    retrieve/keyword.KeywordIndex  (BM25 + prior)
-                                                │
-                                                ▼
-                              retrieve/context.build_context  (dedupe + budget)
-                                                │
-                            ┌───────────────────┴───────────────────┐
-                            ▼                                       ▼
-              answer/single_pass.OfflineExtractiveAnswerer   LLMAnswerer (chat model)
-                            └───────────────────┬───────────────────┘
-                                                ▼
-                              cite/verify.verify_citations  ([E#] → real lines)
-                                                ▼
-                                    AnswerResult + JSONL run trace
+本地仓库
+  │  ingest.scan_repository        只读遍历、上限、跳过原因
+  ▼
+文本 ── parse.chunk_source ──▶ 分块（原始行 + 行号区间）
+  │                                  │
+  │                                  ▼
+  │                          index.ChunkIndex（绑定 repo_id + commit）
+  │                                  │
+  │            ┌─────────────────────┴─────────────────────┐
+  │            ▼                                           ▼
+  │   retrieve.KeywordIndex（BM25）              embed.client → 向量
+  │            │                                           │
+  │            │                                    vector.VectorStore（Qdrant 本地）
+  │            └──────────────┬────────────────────────────┘
+  ▼                           ▼
+file_texts（供核对）   retrieve.build_context（去重 + 预算 + 行号渲染）
+                              │
+                              ▼
+                 answer.single_pass（离线基线 / LLM 单次）
+                              │
+                              ▼
+                 cite.verify_citations（[E#] → 真实行号）
+                              │
+                              ▼
+                 AnswerResult + JSONL 轨迹
 ```
 
-## Module map
+## 模块地图
 
-| Module | Responsibility | Notes |
+| 模块 | 职责 |
+| --- | --- |
+| `models.py` | Chunk / Evidence / CitationReport / AnswerResult，行号不变式在此强制 |
+| `config.py` | 从环境变量与 `.env` 读取配置；密钥不出现在 `repr` 与摘要中 |
+| `runlog.py` | JSONL 轨迹；凭据类字段脱敏 |
+| `ingest/local.py` | 只读扫描、上限、符号链接不跟随、git 工作树状态、路径校验 |
+| `parse/python_chunker.py` | tree-sitter 结构分块、切分、语法错误恢复 |
+| `parse/text_chunker.py` | Markdown 按标题分节、配置/纯文本按行切分 |
+| `retrieve/keyword.py` | BM25、标识符切词、中文二元组、kind 先验 |
+| `retrieve/context.py` | 去重、预算计费、带行号渲染、裁剪 |
+| `vector/store.py` | Qdrant 本地持久化；集合按模型+维度隔离；读写强制版本过滤 |
+| `answer/single_pass.py` | 离线抽取基线 + LLM 单次回答（同一接口） |
+| `answer/llm.py` | OpenAI 兼容客户端：超时、有界重试、usage、能力探针 |
+| `embed/client.py` | Embedding 客户端：批处理、维度断言、usage |
+| `httpcompat.py` | 代理变量兼容（`NO_PROXY` 中的方括号 IPv6） |
+| `cite/urls.py` | GitHub blob 链接与输入校验 |
+| `cite/verify.py` | 引用校验（仓库/commit/路径/行号/内容） |
+| `pipeline.py` | 编排：建索引、向量检索、提问 |
+| `cli.py` | 命令行：chunk / index / ask / probe |
+
+## 关键决策
+
+### 1. 行号来自原文，绝不来自重新打印的语法树
+
+`lines = text.split("\n")`，所以 tree-sitter 的第 *i* 行就是列表下标 *i*。覆盖
+`[a, b]` 行的分块必须满足 `content == "\n".join(lines[a:b+1])`。测试对每个夹具文件的
+每个分块都断言这一点，包括含语法错误的文件。
+
+行尾在解析前统一：CRLF 与**裸 CR** 都变成 LF（与 Python 的 universal newline 一致）。
+否则裸 CR 文件会塌成一行，第二个分块起全部报第 1 行。限制：对仅用 CR 的文件，
+GitHub 的行锚点可能与我们的行号不一致。
+
+### 2. 分块规则
+
+| 节点 | 分块 | kind |
 | --- | --- | --- |
-| `repoask/models.py` | Chunk, Evidence, CitationReport, AnswerResult | The line-slice invariant is enforced here |
-| `repoask/config.py` | Settings from env / `.env` | Secrets never in `repr` or `safe_summary` |
-| `repoask/runlog.py` | JSONL tracing | Redacts credential-shaped keys |
-| `repoask/ingest/local.py` | Read-only scanning | Limits, no symlinks, no execution |
-| `repoask/parse/python_chunker.py` | tree-sitter chunking | Structure + fault tolerance |
-| `repoask/parse/text_chunker.py` | Markdown/text chunking | Heading sections, line windows |
-| `repoask/retrieve/keyword.py` | BM25 + identifier tokens | CJK bigrams, kind prior |
-| `repoask/retrieve/context.py` | Dedupe, budget, rendering | Line numbers rendered as `  37| code` |
-| `repoask/answer/single_pass.py` | Baseline and LLM answerers | Same interface for stage 3 |
-| `repoask/answer/llm.py` | OpenAI-compatible client | Timeout, bounded retry, usage probe |
-| `repoask/cite/urls.py` | GitHub blob URLs | Rejects non-GitHub and traversal paths |
-| `repoask/cite/verify.py` | Citation validation | Repo/commit/path/range/content checks |
-| `repoask/pipeline.py` | Orchestration | `build_local_index`, `ask`, `ask_local` |
+| 模块级函数 | 完整函数体，含装饰器 | `function` |
+| 类中的函数 | 完整函数体，含装饰器 | `method` |
+| 函数中的函数 | 完整函数体 | `nested_function` |
+| 类 | 类头区域：从 `class` 到第一个成员之前 | `class` |
+| 剩余行（imports、docstring、`if __name__`） | 覆盖补全 | `text` |
 
-## Decisions that matter
+定义查找会**递归进入控制流节点**并保持当前作用域：`def outer(): if flag: def inner()`
+会产生 `outer.inner`；模块级 `if flag: def cond()` 会产生 `cond`。跳过字符串、注释与
+表达式语句（定义不可能出现在其中）。
 
-### 1. Line numbers come from the original text, never from a re-printed tree
+类块不重复方法，方法只索引一次；嵌套函数**会**重复（父函数体 + 自身），因为父体要能
+回答“流程怎么走”，上下文组装时按包含关系去重。
 
-`lines = text.split("\n")`, so tree-sitter row *i* is list index *i*. A chunk covering
-rows `[a, b]` must satisfy `content == "\n".join(lines[a:b+1])`. Tests assert this for
-every chunk of every fixture file, including a file with a syntax error.
+超限块按行窗口切分并保留重叠，每块记录 `part_index`/`part_count`，父上下文是该函数的
+签名。
 
-Line endings are normalised before parsing: CRLF **and a bare CR** both become LF, matching
-Python's universal-newline reading. Without the bare-CR rule an old-Mac file collapses into
-one tree-sitter row and every chunk after the first reports line 1 (review finding 7).
-Limitation: for a CR-only file, GitHub's blob line anchors may disagree with ours.
+### 3. 语法错误不能毁掉整个文件
 
-Consequences: chunk text is always one contiguous slice; enclosing signatures are stored
-in a separate `parent_context` field with their own line numbers, so they can be shown
-without breaking contiguity.
+tree-sitter 容错，但一个未闭合括号会让它把文件剩余部分吞进一个 `ERROR` 节点。若顶层
+遍历没有恢复出任何定义，则按顶层块重新解析，保留能干净解析的块并把行号加上偏移。
+坏块保留为 `text` 并标记 `has_syntax_error`；恢复只做一层。
 
-### 2. Chunking rules
+块起点是**第一个装饰器**而不是 `def`：回溯会跨过空行、注释，并用括号配平爬到多行
+装饰器的起始行。
 
-| Node | Chunk | Kind |
-| --- | --- | --- |
-| module-level function | full body, decorators included | `function` |
-| function inside a class | full body, decorators included | `method` |
-| function inside a function | full body | `nested_function` |
-| class | header region: `class ...` up to the line before its first nested definition | `class` |
-| anything left over (imports, docstrings, `if __name__`) | filled in by a coverage pass | `text` |
+### 4. 检索：先词法，再向量，融合用排名
 
-Definitions are found by descending through **control-flow nodes** as well, keeping the
-current scope: `def outer(): if flag: def inner()` yields `outer.inner` (kind
-`nested_function`, parent `outer`), and a module-level `if flag: def cond()` yields `cond`.
-Without that descent such definitions only existed inside the parent body and could not be
-found by symbol (review finding 3). Descent skips strings, comments and expression
-statements, where a definition cannot appear.
+BM25 覆盖内容 + 标识符 + 路径；标识符按 `_` 与驼峰拆分；中文按二元组（未内置分词器），
+因此 `时间` 这类常见词可能误命中无关注释。
 
-A class chunk never repeats its methods, so method code is indexed once. Nested functions
-*are* duplicated (present in the parent body and as their own chunk) because parent bodies
-answer "how does this flow work" questions; `build_context` drops nested overlap at
-selection time.
+`DEFAULT_KIND_WEIGHTS = {"text": 0.6}` 用于压低“剩余块”。先验必须作用在**符号加分之后**，
+否则精确符号命中的标题会带着满分躲过先验（这是被测试抓到的真实缺陷）。
 
-Large blocks are split by line windows with overlap; each part records `part_index`/
-`part_count` and carries the definition's signature as its parent context.
+向量侧：集合名由 **模型 + 维度** 派生，写入与检索都强制 `repo_id + commit` 过滤，
+查询前校验 query embedding 与索引记录的模型一致。不同模型的向量空间不可比，所以
+不一致时**直接报错**而不是给出错误结果。
 
-### 3. Syntax errors must not cost the whole file
+融合将采用 **RRF（按排名）**，而不是把 BM25 分数与余弦相似度相加。
 
-tree-sitter is error tolerant, but one unclosed bracket can make it swallow the rest of
-the file into a single `ERROR` node (verified with `app/broken.py`). When the top-level
-walk recovers no definitions at all, the chunker re-parses the file as independent
-top-level blocks and keeps the blocks that parse cleanly, shifting their line numbers to
-absolute values. The broken block stays as `text` and is flagged `has_syntax_error`.
-Recovery is one level deep only.
+### 5. 版本绑定
 
-A block starts at the definition's **first decorator**, not at `def`: the scan walks back
-over blank lines, comment lines and complete decorator statements, climbing to the top of
-a logical statement by bracket balance so a multi-line decorator is recognised as one
-unit. Missing this put `@app.route(...)` into the error text block (review finding 4).
+每个分块带 `repo_id` + `commit`；`ChunkIndex.assert_version` 拒绝跨版本使用；检索过滤两者。
 
-### 4. Retrieval is lexical in stage 1
+git 工作树只有在 **HEAD 与索引到的字节一致**时才用 HEAD 标注。`inspect_git_worktree`
+读取 porcelain 状态，只保留涉及“可索引文件”的条目；只要有修改或未跟踪源码，版本就退化
+为内容摘要（`worktree_digest`），并在 `git_head`/`worktree_dirty` 保留来源证据。否则两份
+不同内容会共用同一个 commit id，引用会指向该 commit 中不存在的行。
 
-BM25 over content + identifiers, with symbol and path tokens repeated. Identifier tokens
-are split on `_` and camelCase; Chinese runs become character bigrams (no segmenter is
-bundled). Consequence: common bigrams such as "时间" can match unrelated comments; this is
-a known gap that vector search is meant to close.
+### 6. 上下文预算是真实上限
 
-`DEFAULT_KIND_WEIGHTS = {"text": 0.6}` down-weights leftover chunks. The prior is applied
-*after* the exact-symbol bonus — applied before, a README heading would keep its full
-bonus and ignore the prior (this was a real bug caught by a test).
+`build_context` 以 `len(rendered)` 计费（含 `"\n\n"` 分隔符），每个候选按剩余额度渲染。
+放不下的块在行边界裁剪，保留头部、真实行号与“省略 N 行”的标记，并记入
+`bundle.truncated` 与结果说明。若连一行代码都放不下，则整块丢弃——**绝不引用模型没看到
+的代码**。
 
-Fusion with vector results will use **RRF over ranks** rather than adding incomparable
-scores (stage 2).
+### 7. 引用有效 ≠ 结论正确
 
-### 5. Citation validity ≠ answer correctness
+`verify_citations` 能证明：id 是本次提供的、属于本仓库本 commit、路径相对且安全、行号
+范围合法、内容哈希一致；给了源码文本时还能逐字比对。它不能证明证据支撑结论——那需要
+人工评分或阶段 5 的评测。
 
-`verify_citations` proves: the id was provided, it belongs to this repo and commit, the
-path is relative and safe, the range is valid, the content matches its hash, and — when
-source text is supplied — the cited lines equal the real file text. It cannot prove the
-evidence supports the conclusion; that needs human review or the stage 5 harness. The two
-are reported separately, and `source_checked_count` makes "compared with real source"
-visible instead of implying it.
+核对用的源码文本通过 `pipeline.load_indexed_source_texts` 读取：复用安全扫描，只读“在
+索引中且被扫描接受”的路径，因此不会跟随符号链接越出仓库，也不会读到被跳过的缓存。
 
-Source text for that comparison is loaded with `pipeline.load_indexed_source_texts`, which
-reuses the safe scanner and only reads paths that are both in the index and indexable, so
-verification cannot follow a symlink out of the repository or read a skipped cache file
-(review finding 2).
+引用检查失败后最多修正一次，且只在该次修正**全部引用有效**或明确“不足以判断且无引用”
+时采纳；按数量比较会把 1/2 → 1/3 当成进步。
 
-A failed citation check triggers at most one repair, adopted only when it is strictly
-usable — every citation valid, or an explicit "insufficient evidence" answer with no
-citations. Comparing valid *counts* would accept 1/2 → 1/3 as an improvement (review
-finding 6).
+### 8. 两个回答器，一个接口
 
-### 6. Two answerers, one interface
+`OfflineExtractiveAnswerer` 是确定性基线，标记为 `offline_extractive`，用于无密钥测试与
+演示，不是模型答案的替代品。`LLMAnswerer` 做一次调用，可在引用检查失败后修正一次，
+provider 不返回 usage 时记 `None`（unavailable），不记 0。
 
-`OfflineExtractiveAnswerer` is deterministic and labelled `offline_extractive`; it exists
-so the pipeline is testable and demoable without credentials, and it is not a substitute
-for a model answer. `LLMAnswerer` performs one completion, may repair invalid citations
-once, and records `usage` as `None` ("unavailable") when the provider omits it.
+系统提示词明确：仓库内容是被分析的数据，不是指令。
 
-The system prompt states that repository content is data, not instructions.
+## 失败语义
 
-### 7. Version binding
+- 单文件问题不中断构建：写入 `index.skipped` 并给出原因。
+- 仓库级上限（文件数/总字节/耗时）抛 `IngestLimitExceeded`。
+- 只接受仓库相对路径：绝对路径与盘符路径在解析前即拒绝；符号链接从不跟随。
+- 向量集合维度不符、模型不符、版本混入 → `VectorStoreError`。
+- 聊天/embedding 失败 → `LLMUnavailable` / `EmbeddingUnavailable`（含尝试次数），不静默返回空。
+- 无证据 → `termination_reason="no_evidence"`，答案“不足以判断”。
+- 引用失败给出机器可读原因码；上下文裁剪与丢弃都有记录，不静默。
 
-Every chunk carries `repo_id` + `commit`; `ChunkIndex.assert_version` refuses cross-version
-use; retrieval filters on both.
+## 尚未实现
 
-A git work tree is labelled with its HEAD **only when HEAD describes the bytes that were
-indexed**. `inspect_git_worktree` asks git for the porcelain status and keeps only entries
-that touch indexable files; any modification or untracked source file means the working
-tree no longer matches the commit. In that case the version is a content digest labelled
-`worktree_digest`, while `git_head` and `worktree_dirty` preserve the provenance. Otherwise
-two different contents could share one commit id and citations could point at lines that do
-not exist in that commit (review finding 1). A plain non-git directory behaves the same way.
-
-### 8. The context budget is a real bound
-
-`build_context` charges each block against `len(rendered)`, including the `"\n\n"`
-separator, and renders each candidate to the remaining allowance. A block that does not fit
-is truncated at a line boundary, keeping its header, its real line numbers and a
-`... (N lines omitted by budget)` marker, and the truncation is recorded in
-`bundle.truncated` and surfaced in `AnswerResult.notes`. If a block cannot show at least one
-code line it is dropped instead of cited, so a citation never points at code the model did
-not see. Before this rule the first block was accepted however large it was and separators
-were undercounted (review finding 5).
-
-## Failure semantics
-
-- Per-file problems never abort a build: they are recorded in `index.skipped` with a reason.
-- Repository-level limits (files, total bytes, elapsed time) raise `IngestLimitExceeded`.
-- Ingestion accepts repository-relative paths only: `read_bytes_checked` rejects absolute
-  forms even when they resolve inside the root, and symlinks are never followed.
-- Chat failures raise `LLMUnavailable` with attempt count; no silent empty answers.
-- No evidence produces `termination_reason="no_evidence"` and the answer "不足以判断".
-- A citation that fails validation is reported with a machine-readable issue code.
-- Context truncation and dropped candidates are always recorded, never silent.
-
-## Not built yet
-
-Vector index and hybrid fusion (stage 2); LangGraph tool loop with step/time budgets
-(stage 3); GitHub import, FastAPI, Streamlit (stage 4); question set and controlled
-experiments (stage 5). No multi-agent design, knowledge graph or task queue is planned.
+RRF 混合检索与重排（阶段 2 增量 2）、LangGraph 工具循环与预算（阶段 3）、
+GitHub 导入 / FastAPI / Streamlit（阶段 4）、固定题库与对照实验（阶段 5）。
+不引入多 Agent、知识图谱或分布式任务系统。

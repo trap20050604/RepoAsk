@@ -229,7 +229,7 @@ def build_context(
             end_line=chunk.end_line,
             content=chunk.content,
             content_hash=chunk.content_hash,
-            source="keyword",
+            source=hit.source,
             score=hit.score,
             parent_context=chunk.parent_context if budget.include_parent_context else None,
             url=url,

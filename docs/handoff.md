@@ -1,190 +1,131 @@
-# Handoff — current state
+# 交接单（handoff）
 
-Last updated: 2026-10-19 (Asia/Shanghai). Stage: **1 complete + independent review round 1
-addressed**. Next stage: 2 (vector index, hybrid retrieval, context management).
+最后更新：2026-10-19（Asia/Shanghai）。
+当前阶段：**阶段 1 完成并处置完独立审查第 1 轮；阶段 2 增量 1（向量存储）完成**。
+下一阶段：阶段 2 增量 2（RRF 混合检索 + 对照观察）。
 
-**Stage report (module-9 format): [`docs/reports/stage-1.md`](reports/stage-1.md)** — what the
-user can do, which modules changed, request flow, trade-offs, verification, reading list and
-exercises. One report per stage; chat summaries are not the deliverable.
+## 提交与推送
 
-Functional fix commit: `1015470` — "fix: address independent review round 1 (8 findings,
-P1 x2, P2 x6)"; documentation-only commits follow it, so use `git log -1` for the tip.
-Reviewed baseline: `35caa13`. The stage-1 feature commit was `9ee1115`; later commits added
-the embedding client, the corrected git diagnosis, the IDE-file cleanup and this review
-disposition. Reviewers only need the diff `35caa13..1015470`.
+- 当前提交：以 `git log -1` 为准（本文件随每次提交一起更新）。
+- 阶段 2 增量 1 的起始提交：`9e0c0d6`。
+- 审查基线：`35caa13`；审查修复提交：`1015470`（看代码差异用 `git diff 35caa13..1015470`）。
+- 阶段 1 功能提交：`9ee1115`。
+- 推送：全部推送到 `origin/main`。本机到 GitHub 的链路**间歇性中断**（曾出现
+  `Connection was reset` / `443 端口连接超时`，而同时刻 `curl https://github.com` 返回 200）。
+  处理方式就是**重试** `git push`，不要改 git 配置，更不要关闭证书校验。
+- 本机代理客户端会设置 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY=http://127.0.0.1:7897`，
+  GitHub 可达性与代理开关状态相关。
 
-**Push state:** pushed successfully at 2026-10-18 17:48 (`35caa13..5356401`). `origin/main`
-and local `main` now point at the same tip, verified two ways: `git ls-remote origin
-refs/heads/main` and the GitHub commits page (which shows `1015470` and its subject line).
+## 阶段报告（模块九，每阶段一份）
 
-Context for later readers: pushes at 17:4x failed with `Recv failure: Connection was reset`
-or `Failed to connect to github.com port 443`, while `curl https://github.com` simultaneously
-returned 200 — GitHub connectivity from this network is intermittent, not broken. Retrying
-`git push` was sufficient, and no history rewrite was needed. The docs-only commit `816affa`
-still contains the words "push is blocked"; that message is historical and superseded by
-this note.
+| 报告 | 内容 |
+| --- | --- |
+| [`docs/reports/stage-1.md`](reports/stage-1.md) | 阶段 1 + 审查第 1 轮：能力、模块、请求流、取舍与限制、验证、阅读清单、练习 |
+| [`docs/reports/stage-2.md`](reports/stage-2.md) | 阶段 2 增量 1：向量存储、embedding 元数据、真实对照观察、NO_PROXY 故障处理 |
 
-## Verified after the review round (2026-10-18)
+`docs/learning-guide.zh-CN.md` 是项目所有者自己维护的学习手册（当前**未纳入版本控制**），
+本项目的文档不重复其内容。
 
-| Check | Command | Result |
+## 环境
+
+- 解释器：`D:\anaconda\envs\trap\python.exe`，Python 3.11.16（Windows 10.0.26100）。
+  PATH 上的 `python` 是另一个 3.8 安装，**必须用全路径**。
+- 为项目安装的依赖（未改动其它环境）：
+  `tree-sitter==0.25.2`、`tree-sitter-python==0.25.0`、`qdrant-client==1.19.1`
+  （附带 h2、hpack、hyperframe、portalocker、pywin32）。
+  注意：`tree-sitter-python` **没有 0.25.1 版本**，镜像上最高 0.25.0。
+- 本机目录权限有两处异常，均已处理或绕过：
+  - `E:\RepoAsk` 原先缺少 `WRITE_OWNER`，已为当前用户修复；备份与回滚脚本在
+    `E:\RepoAsk-acl-recovery\`（`acl-backup-8c2feff9*.ps1`）。
+  - `%TEMP%\pytest-of-ncp` 连读 ACL 都被拒绝，无法在无提权情况下修复；
+    已在 `tests/conftest.py` 把 pytest 的 `basetemp` 重定向到项目内 `.pytest-tmp/`。
+
+## 已真实验证的能力（有调用记录，不是推断）
+
+| 能力 | 端点 / 模型 | 实测结果 |
 | --- | --- | --- |
-| Test suite | `python -m pytest` | **92 passed, 2 skipped** in ~3.7 s |
-| Review reproductions | `python -m pytest tests/test_review_fixes.py -q` | 18 passed, 1 skipped |
-| Budget enforcement | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question "load_tasks 做了什么？" --max-chars 400` | context ≤ 400 chars, truncation reported in notes |
-| Dirty-worktree labelling | `python -m pytest tests/test_review_fixes.py -k dirty` | HEAD not used when indexable files are modified/untracked |
-| Chunker output | `python -m repoask.cli chunk --repo-root tests/fixtures/demo_repo --path app/service.py` | 8 chunks: 1 text, 1 class, 4 functions, 2 nested |
-| Offline answer | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question "重试逻辑是在哪个函数里实现的？"` | 2/2 citations valid, both compared with source text |
-| Index build | `python -m repoask.cli index --repo-root tests/fixtures/demo_repo --out data/index/demo.jsonl` | 25 chunks from 7 files (2 class, 5 function, 4 method, 3 nested_function, 11 text) |
-| Query a saved index | `python -m repoask.cli ask --index data/index/demo.jsonl --repo-root tests/fixtures/demo_repo --question "配置解析器怎么判断内容为空？"` | 2/2 citations valid, ConfigParser found |
-| No-credential path | `python -m repoask.cli ask --repo-root tests/fixtures/demo_repo --question x --llm` | exits 2 with an explicit "LLM 未配置" message, no crash |
-| Environment probe | `python -m repoask.cli probe` | tree-sitter 0.25.2 / tree-sitter-python 0.25.0, pydantic 2.13.5, openai 3.26.1 |
+| 聊天基础调用 | `deepseek-chat` @ `api.deepseek.com/v1` | 通过，回复 `pong` |
+| 聊天 usage | 同上 | 通过，返回 token 统计 |
+| 聊天**工具调用** | 同上 | 通过，返回 1 个 tool call |
+| 聊天流式 | 同上 | 通过，16 个 chunk / 14 字符 |
+| Embedding | `qwen3.7-text-embedding-flash` @ DashScope 兼容接口 | 通过，**1024 维**（与配置一致） |
+| 向量索引构建 | 25 个分块 | `embedding_ms=1182`、`embedding_tokens=1467`、集合名含模型与维度 |
+| Qdrant 本地模式 | `qdrant-client==1.19.1` | 建集合/写入/payload 过滤/重开均通过；本地无 `search()`，用 `query_points`；`create_payload_index` 是 no-op |
 
-Two skipped tests: `test_symlinks_are_never_followed` and its review-round variant; creating
-a symlink needs privileges this shell does not have. They self-skip and are not passing
-safety checks.
+## 测试
 
-Extra defect found while writing the stage report (2026-10-19): the `done` trace event passed
-`elapsed_ms` as a payload field, which overwrote the logger's own elapsed column and produced
-a non-monotonic trace (1 ms after 83 ms). Renamed to `pipeline_elapsed_ms`; the e2e test now
-asserts monotonic `elapsed_ms` and the presence of `pipeline_elapsed_ms`.
+```
+python -m pytest   →   107 passed, 2 skipped in 6.01s
+```
 
-Untracked by design: `docs/learning-guide.zh-CN.md` (the project owner's 83 KB study guide)
-exists in the working tree, was not created or modified by this work, and is **not**
-committed. Decide whether to track it separately.
-
-## Independent review round 1 (baseline `35caa13`): disposition
-
-All eight findings reproduced locally before any change; each now has a failing-first test
-in `tests/test_review_fixes.py`.
-
-| # | Sev | Verdict | Change | Verification |
-| --- | --- | --- | --- | --- |
-| 1 | P1 | 成立 | `inspect_git_worktree` + `ChunkIndex.git_head` / `worktree_dirty`; a dirty tree gets a content digest instead of HEAD | `test_dirty_worktree_is_not_labelled_as_git_head`, `test_untracked_source_also_invalidates_head` |
-| 2 | P1 | 成立 | `pipeline.load_indexed_source_texts` reuses the safe scanner; CLI no longer uses `rglob`/`read_bytes` | `test_index_source_loading_ignores_symlinks_and_unsupported_files`, `..._only_reads_indexed_paths` |
-| 3 | P2 | 成立 | `_walk` descends through control-flow nodes, keeping scope | 3 tests: function/method/module-level conditional definitions |
-| 4 | P2 | 成立（单行装饰器原本正常） | `_decorator_group_start` + bracket-balance scan; blank/comment lines and multi-line decorators included | 5 parametrised cases |
-| 5 | P2 | 成立 | budget charged on the real rendered length incl. separators; oversized block truncated with a marker, or dropped if it cannot show ≥1 line | 3 tests incl. `used_chars == len(rendered)` |
-| 6 | P2 | 成立 | repair adopted only if `all_valid`, or an insufficient answer without citations | `test_revision_with_more_invalid_citations_is_not_adopted` |
-| 7 | P2 | 成立 | decoder normalises bare CR as well as CRLF | `test_bare_cr_line_endings_keep_true_line_numbers` |
-| 8 | P2 | 成立（属契约/纵深防御，未越出根目录） | `read_bytes_checked` rejects absolute and drive-qualified paths before resolving | `test_absolute_path_inside_root_is_rejected` |
-
-Not changed, by decision:
-
-- **Optional improvement** (reviewer's note): when `file_texts` is `None`, `all_valid` can be
-  true with `source_checked_count == 0`. The CLI already prints how many citations were
-  compared with real source, so this is visible; making it a hard failure is deliberately
-  deferred and tracked below.
-- Prior over-fitting and FastAPI concurrency were not claimed as defects by the reviewer and
-  remain out of scope for this round.
-
-## Environment
-
-- Interpreter `D:\anaconda\envs\trap\python.exe`, Python 3.11.16 (Windows 10.0.26100).
-  `python` on PATH is an unrelated 3.8 install; always use the full path.
-- Installed for this project, nothing else changed:
-  `tree-sitter==0.25.2`, `tree-sitter-python==0.25.0`, `qdrant-client==1.19.1`
-  (plus its own dependencies: h2, hpack, hyperframe, portalocker, pywin32).
-  Note: `tree-sitter-python` has **no 0.25.1 release** (verified against the USTC mirror:
-  available versions end at 0.25.0).
-
-## Verified model and storage capabilities (2026-10-18, real calls)
-
-| Capability | Endpoint / model | Measured result |
+| 测试文件 | 用例数 | 覆盖 |
 | --- | --- | --- |
-| Chat basic call | `deepseek-chat` @ `api.deepseek.com/v1` | ok, reply `pong` |
-| Chat usage reporting | same | ok, token usage returned |
-| Chat **tool calling** | same | ok, 1 tool call returned |
-| Chat streaming | same | ok, 16 chunks / 14 chars |
-| Embedding | `qwen3.7-text-embedding-flash` @ DashScope compatible-mode | ok, **1024 dimensions** (matches config), 1906 ms, 23 prompt tokens |
-| Qdrant local mode | `qdrant-client==1.19.1`, `path=` persistence | create / upsert / payload filter / reopen all pass |
+| `test_python_chunker.py` | 14 | 行号不变式、覆盖完整、装饰器、嵌套、类边界、语法错误恢复、切分、编码与换行 |
+| `test_review_fixes.py` | 18 | 独立审查 8 项缺陷的回归 |
+| `test_citation_verify.py` | 13 | 引用校验各失败分支、URL 构造、输入校验 |
+| `test_ingest_local.py` | 10 | 跳过规则、上限、符号链接、路径越界 |
+| `test_retrieval.py` | 10 | 分词、符号命中、版本隔离、去重、预算、渲染 |
+| `test_llm_client.py` | 9 | 重试、超时、usage 缺失、修正采纳规则（桩，无网络） |
+| `test_stage1_end_to_end.py` | 8 | 端到端、版本绑定、轨迹事件、缺配置分支 |
+| `test_config_and_logging.py` | 7 | `.env` 解析、密钥脱敏、日志截断 |
+| `test_httpcompat.py` | 5 | `NO_PROXY` 方括号 IPv6 导致 httpx 崩溃 |
+| `test_text_chunker.py` | 5 | Markdown 标题/围栏、配置文本、类型分发 |
+| `test_vector_store.py` | 10 | 向量写入/检索的版本隔离、维度校验、集合隔离、命中映射 |
 
-Two API facts to remember from the Qdrant probe: local mode has **no `search` method**
-(use `query_points`), and `create_payload_index` is a documented no-op locally (it emits a
-warning), so filtering correctness must be tested by result inspection, not by index
-existence.
+跳过 2 项均为“创建符号链接需要权限”的自跳过用例，**不算通过的安全检查**。
 
-## Blockers and unverified items
+## 独立审查第 1 轮处置（基线 `35caa13`）
 
-1. **Credentials are now configured and verified (2026-10-18).** Chat and embedding were
-   both probed with real calls (table above). Still unverified by design: model *answer
-   quality* (no evaluation yet), the LangGraph tool loop integration (stage 3), and
-   embedding cost/latency at repository scale.
-2. **git 可用——此前的"git 不可用"结论是错的，已更正（2026-10-18 16:40）。**
-   - 早先 `git ls-remote https://github.com/trap20050604/RepoAsk` 失败于
-     `schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS (0x8009030E)`，
-     换成 `-c http.sslBackend=openssl` 则变成 `Recv failure: Connection was reset`。
-   - 真实原因是**当时进程运行在沙箱受限令牌下**：Windows schannel 在该令牌中无法获取 TLS
-     凭据，openssl 后端的连接也被拦断。这不是机器或 git 安装的故障。
-   - 沙箱放宽为完全访问后复测：
-     `git clone --depth 1 --single-branch https://github.com/pallets/flask` **成功，2 秒**，
-     `HEAD=d086db856be187255b8ec61ef409357393020f32`，与 `git ls-remote` 一致；
-     `git ls-remote` 返回 `exit 0`。结论：**阶段 4 可以正常使用 `git clone`**。
-     教训：环境受限时得到的"某工具坏了"结论，必须在权限变化后复测再写进文档。
-   - 仍然成立的两条事实：
-     - 远端仓库 `https://github.com/trap20050604/RepoAsk` **是空仓库**（页面含
-       "This repository is empty"，`ls-remote` 无 refs）。首次推送会创建 `main`。
-     - 无 token 的 GitHub API 会被限流（403，共享出口 IP `3.112.217.125`）。clone 不需要
-       token；若阶段 4 要用 API 取元数据，需要只读 token 作为可选增强。
-3. **This machine has broken directory permissions in two places.**
-   - `E:\RepoAsk` denied `WRITE_OWNER`; repaired for the current user. Backup and rollback
-     script: `E:\RepoAsk-acl-recovery\acl-backup-8c2feff960ec43ce9005a772a8d68d4a.*`,
-     report `acl-report-a938299aaa9a445d9e6e65c992a984f3.jsonl`.
-   - `%TEMP%\pytest-of-ncp` denies even reading its ACL, so it cannot be repaired without
-     elevation. Workaround in `tests/conftest.py`: pytest's `basetemp` is redirected to
-     `.pytest-tmp/` inside the project (git-ignored). Delete the stale directory from
-     Explorer when convenient; `pytest` works either way.
+8 项全部先复现、再修复，每项都有失败优先的回归测试（`tests/test_review_fixes.py`）。
 
-## Known limitations (deliberate, documented)
+| # | 级别 | 判断 | 改动 |
+| --- | --- | --- | --- |
+| 1 | P1 | 成立 | 脏/未跟踪工作树不再标 HEAD：`inspect_git_worktree` + `git_head`/`worktree_dirty`，版本退化为内容摘要 |
+| 2 | P1 | 成立 | 引用核对改走 `pipeline.load_indexed_source_texts`（复用安全扫描），不再 `rglob` + 裸读 |
+| 3 | P2 | 成立 | 控制流内的定义递归分块（`if`/`try` 内的 `def`），保持作用域 |
+| 4 | P2 | 成立（单行装饰器原本正常） | 括号配平回溯，识别多行装饰器、空行、注释 |
+| 5 | P2 | 成立 | 预算按真实渲染长度计费（含分隔符）；超限裁剪并记录；不足一行代码的证据直接丢弃 |
+| 6 | P2 | 成立 | 修正只在 `all_valid` 或“不足以判断且无引用”时采纳 |
+| 7 | P2 | 成立 | 裸 `\r` 与 CRLF 一并归一化 |
+| 8 | P2 | 成立（契约/纵深防御，未越出根目录） | 绝对路径/盘符路径解析前即拒绝 |
 
-- Retrieval is lexical only; CJK bigrams mean a common word like "时间" can match an
-  unrelated comment. The `{"text": 0.6}` prior is tuned on a 25-chunk fixture with 5
-  hand-checked questions — a starting prior, not a validated finding.
-- Nested functions appear twice in the index (parent body + own chunk); context assembly
-  drops the nested overlap.
-- Syntax-error recovery is one level deep and heuristic: it trusts column-0 `def`/`class`
-  and bracket balance, so exotic formatting (a decorator spanning an f-string, deeply
-  unbalanced lines) can still be mis-grouped.
-- Line endings are normalised (CRLF and bare CR → LF). For a CR-only file, GitHub's blob
-  line anchors may disagree with our line numbers.
-- A budget-truncated evidence block is cited for its full range while the model saw only
-  the first N lines; the truncation is reported in `AnswerResult.notes` and in
-  `bundle.truncated`, but the model cannot know the omitted content.
-- When `file_texts` is `None` (e.g. `ask --index` without `--repo-root`), citations are only
-  proven internally consistent: `all_valid` can be true with `source_checked_count == 0`.
-  The CLI prints that count, but this is a residual trust gap (reviewer's optional item).
-- No call graph, no streaming, no tool loop, no API/UI yet.
-- `Ask` has no timeout budget in stage 1: single-pass only. Budgets arrive in stage 3.
+未采纳：审查者列为“可选改进”的 `file_texts=None` 时 `all_valid` 但未核对源码，
+当前以 `source_checked_count=0` 明示，是否升级为硬失败留待阶段 4 的调用方设计。
 
-## Next steps (stage 2)
+## 本轮另外修掉的两个缺陷
 
-1. ~~Verify the embedding endpoint for real~~ **done**: 1024 dims confirmed; the client
-   already fails loudly on a dimension mismatch. Remaining: persist model + dimensions in
-   `ChunkIndex.embedding` and refuse to reuse an index built with different embeddings.
-2. Write `repoask/vector/store.py` around `QdrantClient(path=...)`: collection per embed
-   model, deterministic point ids, payload filters on `repo_id` + `commit`, and a
-   `delete_version(repo_id, commit)` for re-imports. Use `query_points` (local mode has no
-   `search`).
-3. Fuse keyword and vector results with **RRF over ranks**; keep each retriever's own score
-   in the trace so the stage-5 comparison can show both sides.
-4. Re-run the 5 hand questions and record whether the `{"text": 0.6}` prior is still
-   justified once vectors are in play.
-5. Decide the `file_texts is None` policy (hard warning vs. refusing to mark citations
-   valid) when the UI exists, since that is where the caller chooses whether source text is
-   available.
+1. **轨迹耗时被业务字段覆盖**：`done` 事件原用 `elapsed_ms` 传管道耗时，覆盖了日志自身
+   的标准列，导致出现“1 ms 在 83 ms 之后”的非单调记录。改为 `pipeline_elapsed_ms`，
+   并加断言：轨迹的 `elapsed_ms` 必须单调不减。
+2. **代理变量导致 HTTP 客户端无法创建**：`NO_PROXY` 含 `[::1]` 时，httpx 抛
+   `InvalidURL: Invalid port`，聊天与 embedding 客户端全部无法构造。新增
+   `repoask/httpcompat.sanitize_no_proxy()`，在构造前移除方括号写法并在探针中回报。
 
-## Where to read code
+## 已知限制（如实记录）
 
-- `repoask/parse/python_chunker.py` — `chunk_python_source`, `_Emitter._emit_definition`,
-  `_decorator_group_start`, `_recover_top_level_blocks`.
-- `repoask/pipeline.py` — `build_local_index`, `load_indexed_source_texts`, `ask`.
-- `repoask/cite/verify.py` — `verify_citations`.
-- `repoask/ingest/local.py` — `inspect_git_worktree`, `read_bytes_checked`.
+1. **检索质量没有结论**：阶段 2 只做了 2 个问题的观察；关键词与向量排序不同，
+   但样本不足以说明优劣。质量结论要等固定题库（阶段 5）。
+2. **没有 RRF / 混合检索 / 重排**：`--vectors` 与默认关键词是两条互斥路径。
+3. 检索仍是词法 + 向量的“二选一”；中文按二元组切分，`时间` 之类常见词仍可能误命中。
+4. 无调用图；动态调用、`getattr`、装饰器注入一律不解析。
+5. 模型回答质量未评测；只验证了接口能力。
+6. `file_texts=None` 时引用只证明内部自洽（`source_checked_count=0` 会显示）。
+7. 预算裁剪后，模型看到的行少于引用范围（已在说明中标注）。
+8. 向量以绝对路径记录；换机器或换目录需重建索引；本地 Qdrant 单进程持锁。
+9. 裸 CR 文件的行号与 GitHub 行锚点可能不一致（行尾已归一化为 LF）。
+10. GitHub 导入、FastAPI、Streamlit、题库与对照实验均未实现。
 
-## Exercise for the project owner
+## 下一步
 
-Run `cli chunk` on `app/parser.py`, predict where the `ConfigParser` chunk must end
-(before the first member), then confirm with the output. Then break
-`tests/fixtures/demo_repo/app/broken.py` differently (e.g. delete a closing quote) and
-re-run `pytest tests/test_python_chunker.py` — the line-slice and coverage tests should
-still pass. Acceptance: you can explain why `content` always equals
-`"\n".join(lines[start-1:end])`.
+1. **RRF 融合**：新增 `repoask/retrieve/fusion.py`，按**排名**融合关键词与向量结果
+   （不使用不可比的分数相加），轨迹里同时保留两路分数与名次。
+2. 给 `ask` 增加 `--hybrid`，并记录三种模式的候选来源分布。
+3. 用固定 5 道手检题观察三种模式的名次差异，只记录事实，不宣称提升。
+4. 之后进入阶段 3（LangGraph 工具循环与预算）。
+
+## 阅读入口
+
+- `repoask/parse/python_chunker.py`：`chunk_python_source`、`_decorator_group_start`
+- `repoask/pipeline.py`：`build_local_index`、`search_vector`、`ask`
+- `repoask/vector/store.py`：`upsert_chunks`、`search`
+- `repoask/cite/verify.py`：`verify_citations`

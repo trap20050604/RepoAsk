@@ -19,8 +19,14 @@ from repoask.answer.single_pass import (
 )
 from repoask.cite.urls import normalize_repo_url
 from repoask.cite.verify import verify_citations
-from repoask.errors import ParseError
-from repoask.index import ChunkIndex, EmbeddingInfo, SkippedFile, utc_now_iso
+from repoask.errors import ParseError, VectorStoreError
+from repoask.index import (
+    ChunkIndex,
+    EmbeddingInfo,
+    SkippedFile,
+    VectorRef,
+    utc_now_iso,
+)
 from repoask.ingest.local import (
     IngestLimits,
     inspect_git_worktree,
@@ -37,8 +43,9 @@ from repoask.parse import (
     decode_source,
 )
 from repoask.retrieve.context import ContextBudget, build_context
-from repoask.retrieve.keyword import DEFAULT_KIND_WEIGHTS, KeywordIndex
+from repoask.retrieve.keyword import DEFAULT_KIND_WEIGHTS, KeywordIndex, SearchHit
 from repoask.runlog import RunLogger
+from repoask.vector.store import VectorStore, collection_name
 
 
 @dataclass
@@ -73,8 +80,15 @@ def build_local_index(
     max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
     overlap_lines: int = DEFAULT_OVERLAP_LINES,
     embedding: EmbeddingInfo | None = None,
+    embedder: object | None = None,
+    vector_path: str | Path | None = None,
+    embedding_provider: str | None = None,
 ) -> LocalBuild:
-    """Scan, decode and chunk a local repository into a version-bound index."""
+    """扫描、解码并把本地仓库分块成版本绑定的索引。
+
+    传入 ``embedder``（实现 ``embed(texts) -> EmbeddingResponse``）时，
+    同时写入向量并记录 embedding 模型与维度；此时必须给出 ``vector_path``。
+    """
     started = time.perf_counter()
     scan = scan_repository(root, limits)
     resolved_repo_id = repo_id or scan.root.name
@@ -154,7 +168,97 @@ def build_local_index(
             "overlap_lines": overlap_lines,
         },
     )
+    if embedder is not None:
+        _attach_vectors(
+            index,
+            embedder,
+            vector_path=vector_path,
+            embedding_provider=embedding_provider,
+        )
     return LocalBuild(index=index, file_texts=file_texts, skipped=skipped)
+
+
+def _attach_vectors(
+    index: ChunkIndex,
+    embedder: object,
+    *,
+    vector_path: str | Path | None,
+    embedding_provider: str | None,
+) -> None:
+    """把分块向量写入 Qdrant，并把模型/维度/集合位置写回索引。"""
+    if not index.chunks:
+        return
+    if vector_path is None:
+        raise ValueError("提供 embedder 时必须同时给出 vector_path")
+    response = embedder.embed([chunk.content for chunk in index.chunks])  # type: ignore[attr-defined]
+    model = response.model or "unknown"
+    collection = collection_name(model, response.dimensions)
+    with VectorStore(
+        vector_path, collection=collection, dimensions=response.dimensions
+    ) as store:
+        store.upsert_chunks(
+            index.chunks,
+            response.vectors,
+            repo_id=index.repo_id,
+            commit=index.commit,
+            model=model,
+        )
+        stored = store.count()
+    index.embedding = EmbeddingInfo(
+        provider=embedding_provider, model=model, dimensions=response.dimensions
+    )
+    index.vectors = VectorRef(path=str(Path(vector_path).resolve()), collection=collection)
+    index.stats["vectors"] = stored
+    index.stats["embedding_ms"] = response.latency_ms
+    if response.prompt_tokens is not None:
+        index.stats["embedding_tokens"] = response.prompt_tokens
+
+
+def search_vector(
+    index: ChunkIndex,
+    question: str,
+    embedder: object,
+    *,
+    vector_path: str | Path | None = None,
+    top_k: int = 6,
+) -> list[SearchHit]:
+    """用问题向量检索，并把命中映射回索引里的分块。
+
+    索引与当前 embedder 的模型不一致时直接报错：不同模型的向量空间不可比。
+    """
+    if index.vectors is None:
+        raise VectorStoreError("该索引没有向量，请先用 --embed 重建索引")
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("question must not be empty")
+    response = embedder.embed([question])  # type: ignore[attr-defined]
+    model = response.model or "unknown"
+    if index.embedding is not None and index.embedding.model != model:
+        raise VectorStoreError(
+            f"索引由 {index.embedding.model!r} 构建，当前 embedder 是 {model!r}，"
+            "向量空间不同，请重建索引"
+        )
+    store_path = vector_path or index.vectors.path
+    with VectorStore(
+        store_path, collection=index.vectors.collection, dimensions=response.dimensions
+    ) as store:
+        raw_hits = store.search(
+            response.vectors[0],
+            repo_id=index.repo_id,
+            commit=index.commit,
+            top_k=top_k,
+        )
+    by_id = {chunk.chunk_id: chunk for chunk in index.chunks}
+    hits: list[SearchHit] = []
+    for raw in raw_hits:
+        chunk_id = raw.payload.get("chunk_id")
+        chunk = by_id.get(str(chunk_id)) if chunk_id is not None else None
+        if chunk is None:
+            continue
+        hits.append(
+            SearchHit(chunk=chunk, score=raw.score, matched_terms=[], source="vector")
+        )
+    return hits
 
 
 def load_indexed_source_texts(
@@ -200,8 +304,13 @@ def ask(
     budget: ContextBudget | None = None,
     file_texts: dict[str, str] | None = None,
     logger: RunLogger | None = None,
+    hits: list[SearchHit] | None = None,
 ) -> AnswerResult:
-    """Answer one question against a fixed index, with verified citations."""
+    """Answer one question against a fixed index, with verified citations.
+
+    ``hits`` 用于外部传入候选（例如向量检索结果）；不传时执行关键词检索。
+    这样关键词、向量、混合三条路径共用同一套上下文与引用校验。
+    """
     question = (question or "").strip()
     if not question:
         raise ValueError("question must not be empty")
@@ -209,18 +318,22 @@ def ask(
     active_answerer: Answerer = answerer or OfflineExtractiveAnswerer()
     notes: list[str] = []
 
-    search = KeywordIndex(
-        index.chunks,
-        repo_id=index.repo_id,
-        commit=index.commit,
-        kind_weights=DEFAULT_KIND_WEIGHTS,
-    )
-    hits = search.search(question, top_k=top_k)
+    if hits is None:
+        search = KeywordIndex(
+            index.chunks,
+            repo_id=index.repo_id,
+            commit=index.commit,
+            kind_weights=DEFAULT_KIND_WEIGHTS,
+        )
+        hits = search.search(question, top_k=top_k)
+    else:
+        hits = list(hits)
     if logger:
         logger.record(
             "search",
             question=question,
             top_k=top_k,
+            source=hits[0].source if hits else "none",
             matches=[
                 {
                     "path": hit.chunk.path,
@@ -229,6 +342,7 @@ def ask(
                     "symbol": hit.chunk.symbol,
                     "score": hit.score,
                     "terms": hit.matched_terms,
+                    "source": hit.source,
                 }
                 for hit in hits
             ],

@@ -1,79 +1,85 @@
 # RepoAsk
 
-Ask source-level questions about **one fixed commit** of a public repository and get
-answers whose citations a program can verify: file path, original line numbers and a
-GitHub blob link pinned to that commit.
+针对**一个固定 commit** 的公开仓库回答源码级问题，并给出**程序可核验**的引用：
+文件路径、原始行号、绑定该 commit 的 GitHub 链接。
 
-> Status: **stage 1 of 6** — local repository → structure chunking → lexical search →
-> single-pass answer → verified line citations. Vector search, the LangGraph tool loop,
-> the GitHub import API and the evaluation harness are not built yet.
-> See [docs/handoff.md](docs/handoff.md) for what is actually verified.
+> 当前进度：阶段 1 完成（含独立审查第 1 轮修复）；阶段 2 增量 1（向量存储）完成。
+> 混合检索（RRF）、LangGraph 工具循环、GitHub 导入、FastAPI、Streamlit、评测题库尚未实现。
+> 真实验证记录见 [docs/handoff.md](docs/handoff.md)，每阶段交付说明见
+> [docs/reports/](docs/reports/)，稳定设计见 [docs/architecture.md](docs/architecture.md)。
 
-## What works today
+## 现在能做什么
 
-- **Structure chunking** of Python via tree-sitter: functions, methods, classes,
-  nested functions, decorators, Chinese comments, and files with syntax errors.
-  Every chunk keeps the untouched original source plus `start_line`/`end_line`.
-- **Safe local ingestion**: read-only, size/time limits, symlinks never followed,
-  binaries and caches skipped with a recorded reason.
-- **Lexical + symbol retrieval** (BM25) with a hard repository/commit filter.
-- **Budgeted context** with de-duplication and real line numbers rendered beside code.
-- **Single-pass answering** with two modes: a deterministic offline baseline and an
-  OpenAI-compatible chat model.
-- **Citation verification**: `[E#]` markers are resolved to real evidence, checked
-  against repo/commit/path/line range, and compared with the source text.
-- **JSONL run traces** with credential redaction.
-- 75 tests, no network or credentials needed.
+- **结构分块**：tree-sitter 解析 Python，按函数/方法/类/嵌套函数切块，含装饰器、
+  中文注释、语法错误文件（含块级恢复）；每块保留原始代码与真实行号。
+- **只读导入**：大小/数量/时间上限，符号链接不跟随，二进制与缓存跳过并记录原因；
+  脏工作树不会冒用 git HEAD 作为版本。
+- **关键词/符号检索**（BM25）与**向量检索**（Qdrant 本地持久化，集合按模型+维度隔离），
+  两者都强制按 `repo_id + commit` 过滤。
+- **预算化上下文**：去重、父级签名、带真实行号渲染，超限按行裁剪并记录。
+- **两种回答模式**：离线抽取式基线（无密钥可测）与 OpenAI 兼容聊天模型。
+- **引用校验**：`[E#]` 映射回证据，检查仓库/commit/路径/行号/内容，并能与真实源码逐字比对。
+- **JSONL 轨迹**：检索、上下文、回答、引用检查、完成事件，凭据字段脱敏。
 
-## Quickstart
+## 快速开始
 
 ```powershell
-# Windows, conda env "trap"
+# 测试（离线，不需要密钥）
 & 'D:\anaconda\envs\trap\python.exe' -m pytest
 
-# See exactly what the chunker produces (symbol, kind, original lines, line range)
+# 看一个文件被切成了哪些块（符号、种类、原始行号、父级）
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli chunk `
     --repo-root tests/fixtures/demo_repo --path app/service.py
 
-# Ask a question offline (no model, no key)
+# 离线提问（不调用模型）
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
-    --repo-root tests/fixtures/demo_repo --question "重试逻辑是在哪个函数里实现的？"
+    --repo-root tests/fixtures/demo_repo --question "load_tasks 做了什么？"
 
-# Build and save an index, then query it
+# 构建索引；加 --embed 同时写入向量（需要 .env 中的 EMBEDDING_*）
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli index `
-    --repo-root tests/fixtures/demo_repo --out data/index/demo.jsonl
+    --repo-root tests/fixtures/demo_repo --out data/index/demo.jsonl --embed --vector-dir data/vectors
 
-# Environment and capability probe (prints no secrets)
+# 用向量检索提问
+& 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
+    --index data/index/demo.jsonl --repo-root tests/fixtures/demo_repo `
+    --question "任务名称里的空白是怎么处理的？" --vectors
+
+# 用真实模型回答（需要 LLM_* 配置）
+& 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
+    --repo-root tests/fixtures/demo_repo --question "..." --llm
+
+# 环境与模型能力自检（不打印密钥）
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli probe
 ```
 
-Use `--llm` to answer with the configured chat model (requires `LLM_BASE_URL`,
-`LLM_API_KEY`, `LLM_MODEL`; copy `.env.example` to `.env`). Without them the offline
-baseline runs and is clearly labelled `offline_extractive`.
+配置：复制 `.env.example` 为 `.env` 并填入真实值；`.env` 已在 `.gitignore` 中。
+聊天模型与 embedding 模型**分开配置**，不假设同一供应商。
 
-## Layout
+## 目录结构
 
 ```
 repoask/
-  parse/       tree-sitter Python chunker, Markdown/text fallback
-  ingest/      read-only local repository scanning with limits
-  retrieve/    BM25 keyword/symbol search, context assembly
-  answer/      offline extractive baseline, OpenAI-compatible client
-  cite/        GitHub blob URLs, citation verification
-  index.py     version-bound chunk index (JSONL)
-  pipeline.py  build_local_index / ask / ask_local
-  cli.py       chunk | index | ask | probe
-tests/         behaviour tests + small fixture repository
-scripts/       retrieval inspection helper
-docs/          architecture.md, handoff.md
+  parse/      tree-sitter 分块、Markdown/文本备用切分
+  ingest/     只读安全扫描与 git 状态
+  retrieve/   BM25 检索、上下文组装
+  vector/     Qdrant 本地向量存储
+  embed/      embedding 客户端
+  answer/     离线基线、OpenAI 兼容客户端
+  cite/       GitHub 链接、引用校验
+  index.py    版本绑定索引（JSONL）
+  pipeline.py 建索引 / 向量检索 / 提问
+  cli.py      chunk | index | ask | probe
+tests/        行为测试 + 小型夹具仓库
+docs/         架构、交接单、每阶段报告
+scripts/      检索调试脚本
 ```
 
-## Honest limitations
+## 已知限制
 
-- Retrieval is lexical only. Chinese question wording is matched against English
-  symbol names through docstrings and comments; a semantic gap remains until vector
-  search lands (stage 2). See the measured note in `retrieve/keyword.py`.
-- No call graph: the project never claims to resolve dynamic dispatch or `getattr`
-  indirection.
-- GitHub import, FastAPI and Streamlit are not implemented yet.
-- Stage 1 has no streaming, no tool loop and no multi-step budget enforcement.
+- 检索质量**尚无结论**：只有夹具上的少量观察，没有固定题库与对照实验。
+- 中文按二元组切词，常见词（如“时间”）可能误命中无关注释；混合检索用 RRF 融合，尚未实现。
+- 不做调用图；动态调用与 `getattr` 一律不解析。
+- 模型回答质量未评测，只验证了接口能力（调用/工具调用/流式/usage）。
+- `ask --index` 未给 `--repo-root` 时，引用只证明内部自洽，不会与真实文件比对。
+- 本地 Qdrant 单进程持锁，不支持多进程并发写。
+- 仅支持 Python 源码、README 与常见配置文件；其它类型跳过并记录原因。

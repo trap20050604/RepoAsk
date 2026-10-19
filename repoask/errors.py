@@ -39,5 +39,9 @@ class EmbeddingUnavailable(RepoAskError):
     """The embedding model is not configured, or the endpoint failed."""
 
 
+class VectorStoreError(RepoAskError):
+    """A vector collection is missing, incompatible, or refuses a mixed version."""
+
+
 class CitationError(RepoAskError):
     """A citation could not be resolved to real evidence."""

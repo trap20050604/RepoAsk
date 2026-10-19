@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict
 
 from repoask.config import Settings
 from repoask.errors import EmbeddingUnavailable
+from repoask.httpcompat import sanitize_no_proxy
 
 RETRYABLE_ERROR_NAMES = frozenset(
     {"APITimeoutError", "APIConnectionError", "RateLimitError", "InternalServerError"}
@@ -75,9 +76,13 @@ class EmbeddingClient:
         self.batch_size = max(1, batch_size)
         if client is not None:
             self._client = client
+            self.sanitized_no_proxy: list[str] = []
         else:
             from openai import OpenAI  # lazy import: offline tests need no SDK call
 
+            # 某些代理客户端把 NO_PROXY 写成含 [::1] 的形式，httpx 解析会抛
+            # InvalidURL，导致客户端根本建不起来；先做一次安全清理。
+            self.sanitized_no_proxy = sanitize_no_proxy()
             self._client = OpenAI(
                 api_key=settings.embedding_api_key,
                 base_url=settings.embedding_base_url,
@@ -167,5 +172,13 @@ class EmbeddingClient:
             if response.latency_ms
             else int((time.perf_counter() - started) * 1000),
             prompt_tokens=response.prompt_tokens,
-            detail=f"batch of 1, attempts={response.attempts}",
+            detail=(
+                f"batch of 1, attempts={response.attempts}"
+                + (
+                    "；已从 NO_PROXY 移除 "
+                    + ", ".join(self.sanitized_no_proxy)
+                    if self.sanitized_no_proxy
+                    else ""
+                )
+            ),
         )

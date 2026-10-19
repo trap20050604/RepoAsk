@@ -70,11 +70,27 @@ def _cmd_chunk(args: argparse.Namespace) -> int:
 
 
 def _cmd_index(args: argparse.Namespace) -> int:
+    settings = Settings.load()
+    embedder = None
+    if args.embed:
+        if not settings.embedding_configured:
+            print(
+                "Embedding 未配置：请设置 EMBEDDING_BASE_URL / EMBEDDING_API_KEY / "
+                "EMBEDDING_MODEL。",
+                file=sys.stderr,
+            )
+            return 2
+        from repoask.embed.client import EmbeddingClient
+
+        embedder = EmbeddingClient(settings)
     build = build_local_index(
         args.repo_root,
         repo_id=args.repo_id,
         commit=args.commit,
         repo_url=args.repo_url,
+        embedder=embedder,
+        vector_path=args.vector_dir if embedder is not None else None,
+        embedding_provider=settings.embedding_provider,
     )
     target = build.index.save(args.out)
     summary = build.index.summary()
@@ -90,6 +106,12 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_ask(args: argparse.Namespace) -> int:
     settings = Settings.load()
+    if args.vectors and not args.index:
+        print(
+            "--vectors 需要配合 --index 使用：先用 index --embed 构建带向量的索引。",
+            file=sys.stderr,
+        )
+        return 2
     if args.llm:
         if not settings.llm_configured:
             print(
@@ -115,6 +137,25 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         if args.index:
             index = ChunkIndex.load(args.index)
             file_texts = _load_file_texts(args.repo_root, index) if args.repo_root else None
+            precomputed = None
+            if args.vectors:
+                if not settings.embedding_configured:
+                    print(
+                        "向量检索需要 EMBEDDING_* 配置，且索引必须用 --embed 构建。",
+                        file=sys.stderr,
+                    )
+                    return 2
+                from repoask.embed.client import EmbeddingClient
+                from repoask.pipeline import search_vector
+
+                precomputed = search_vector(
+                    index,
+                    args.question,
+                    EmbeddingClient(settings),
+                    top_k=args.top_k,
+                )
+                if not precomputed:
+                    print("提示：向量检索没有命中，可能索引未用 --embed 构建。", file=sys.stderr)
             result = ask(
                 index,
                 args.question,
@@ -123,6 +164,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
                 budget=budget,
                 file_texts=file_texts,
                 logger=logger,
+                hits=precomputed,
             )
             if logger:
                 logger.record("index", **index.summary())
@@ -263,6 +305,10 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--repo-id", default=None)
     index.add_argument("--commit", default=None)
     index.add_argument("--repo-url", default=None)
+    index.add_argument(
+        "--embed", action="store_true", help="同时写入向量（需要 EMBEDDING_* 配置）"
+    )
+    index.add_argument("--vector-dir", default="data/vectors", help="向量库目录")
     index.set_defaults(func=_cmd_index)
 
     ask_cmd = sub.add_parser("ask", help="针对索引或本地仓库提问")
@@ -275,6 +321,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask_cmd.add_argument("--commit", default=None)
     ask_cmd.add_argument("--repo-url", default=None)
     ask_cmd.add_argument("--log", default=None, help="JSONL 轨迹输出路径")
+    ask_cmd.add_argument(
+        "--vectors",
+        action="store_true",
+        help="用向量检索代替关键词检索（需 index --embed 建好的索引）",
+    )
     mode = ask_cmd.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="使用离线抽取式基线（默认）")
     mode.add_argument("--llm", action="store_true", help="使用已配置的聊天模型")

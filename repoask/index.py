@@ -28,14 +28,22 @@ class SkippedFile(BaseModel):
 
 
 class EmbeddingInfo(BaseModel):
-    """Recorded even before vector search exists, so a stale index cannot be reused
-    with a different embedding model or dimension count."""
+    """记录 embedding 模型与维度，避免用另一个模型（或另一个维度）复用旧向量。"""
 
     model_config = ConfigDict(extra="forbid")
 
     provider: str | None = None
     model: str
     dimensions: int = Field(ge=0)
+
+
+class VectorRef(BaseModel):
+    """向量集合的位置，写进索引以便查询时自动找到同一份向量。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    collection: str
 
 
 class ChunkIndex(BaseModel):
@@ -56,6 +64,7 @@ class ChunkIndex(BaseModel):
     skipped: list[SkippedFile] = Field(default_factory=list)
     stats: dict[str, float | int] = Field(default_factory=dict)
     embedding: EmbeddingInfo | None = None
+    vectors: VectorRef | None = None
 
     @property
     def chunk_count(self) -> int:
@@ -89,6 +98,7 @@ class ChunkIndex(BaseModel):
             "skipped": len(self.skipped),
             "created_at": self.created_at,
             "embedding": self.embedding.model_dump() if self.embedding else None,
+            "vectors": self.vectors.model_dump() if self.vectors else None,
         }
 
     def save(self, path: str | Path) -> Path:

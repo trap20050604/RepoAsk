@@ -73,6 +73,8 @@ class SearchHit(BaseModel):
     chunk: Chunk
     score: float
     matched_terms: list[str] = []
+    # 命中来源：keyword（BM25）或 vector（向量检索）。写进 Evidence 便于对照实验。
+    source: str = "keyword"
 
 
 class KeywordIndex:
