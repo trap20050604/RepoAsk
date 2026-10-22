@@ -18,6 +18,9 @@ dependencies = [
     # reopen all work; local mode has no `search` method (use query_points) and
     # payload indexes are documented as having no effect locally.
     "qdrant-client==1.19.1",
+    # 2026-10-22 实测：StateGraph / START / END / add_conditional_edges 可用；
+    # Agent 图只用这组最小 API。
+    "langgraph==1.2.16",
 ]
 
 [project.optional-dependencies]

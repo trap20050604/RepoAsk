@@ -104,18 +104,58 @@ def _cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_result(result) -> None:
+    print(f"问题: {result.question}")
+    print(f"回答（模式 {result.mode}, 终止原因 {result.termination_reason}）:\n")
+    print(result.answer_text)
+    print()
+    print(f"引用检查: {describe_report(result.citation_report)}")
+    for check in result.citation_report.checks:
+        status = "OK " if check.valid else "BAD"
+        target = f"{check.path}:{check.start_line}-{check.end_line}"
+        print(f"  [{status}] {check.evidence_id}: {target}")
+        if check.url:
+            print(f"        {check.url}")
+        for issue in check.issues:
+            print(f"        ! {issue.code}: {issue.message}")
+    if result.evidence:
+        print("\n证据:")
+        for item in result.evidence:
+            print(f"  [{item.evidence_id}] {item.label}  score={item.score}")
+    if result.notes:
+        print("\n说明:")
+        for note in result.notes:
+            print(f"  - {note}")
+    usage = result.usage
+    print(
+        f"\n耗时: {result.elapsed_ms} ms; "
+        f"usage: {'unavailable' if usage is None else usage.model_dump()}"
+    )
+
+
 def _cmd_ask(args: argparse.Namespace) -> int:
     settings = Settings.load()
-    if args.vectors and args.hybrid:
-        print("--vectors 与 --hybrid 只能选一个。", file=sys.stderr)
-        return 2
-    if (args.vectors or args.hybrid) and not args.index:
-        print(
-            "--vectors/--hybrid 需要配合 --index 使用：先用 index --embed 构建带向量的索引。",
-            file=sys.stderr,
-        )
-        return 2
-    if args.llm:
+    if args.agent:
+        if args.index:
+            print(
+                "--agent 需要 --repo-root（工具要读取原始文件），不能与 --index 同用。",
+                file=sys.stderr,
+            )
+            return 2
+        if args.vectors:
+            print("--agent 下请用 --hybrid 指定“关键词 + 向量”融合检索。", file=sys.stderr)
+            return 2
+    else:
+        if args.vectors and args.hybrid:
+            print("--vectors 与 --hybrid 只能选一个。", file=sys.stderr)
+            return 2
+        if (args.vectors or args.hybrid) and not args.index:
+            print(
+                "--vectors/--hybrid 需要配合 --index 使用：先用 index --embed 构建带向量的索引。",
+                file=sys.stderr,
+            )
+            return 2
+    if args.llm or args.agent:
         if not settings.llm_configured:
             print(
                 "LLM 未配置：请在 .env 或环境变量中设置 LLM_BASE_URL / "
@@ -123,6 +163,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+    if args.llm:
         from repoask.answer.llm import ChatClient
 
         answerer = LLMAnswerer(ChatClient(settings))
@@ -137,6 +178,49 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     )
     logger = RunLogger(args.log) if args.log else None
     try:
+        if args.agent:
+            from repoask.agent.runner import run_agent
+            from repoask.agent.state import AgentBudget
+            from repoask.answer.llm import ChatClient
+            from repoask.pipeline import build_local_index
+
+            if not args.repo_root:
+                print("--agent 需要 --repo-root", file=sys.stderr)
+                return 2
+            build = build_local_index(
+                args.repo_root,
+                repo_id=args.repo_id,
+                commit=args.commit,
+                repo_url=args.repo_url,
+            )
+            if logger:
+                logger.record("index", **build.index.summary())
+            embedder = None
+            if args.hybrid:
+                if not settings.embedding_configured:
+                    print(
+                        "--hybrid 需要 EMBEDDING_* 配置；不加则默认关键词检索。",
+                        file=sys.stderr,
+                    )
+                    return 2
+                from repoask.embed.client import EmbeddingClient
+
+                embedder = EmbeddingClient(settings)
+            result = run_agent(
+                args.question,
+                index=build.index,
+                file_texts=build.file_texts,
+                client=ChatClient(settings),
+                embedder=embedder,
+                budget=AgentBudget(
+                    max_steps=args.max_steps,
+                    max_tool_calls=args.max_tool_calls,
+                    max_seconds=args.max_seconds,
+                ),
+                logger=logger,
+            )
+            _print_result(result)
+            return 0
         if args.index:
             index = ChunkIndex.load(args.index)
             file_texts = _load_file_texts(args.repo_root, index) if args.repo_root else None
@@ -213,32 +297,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         if logger:
             logger.close()
 
-    print(f"问题: {result.question}")
-    print(f"回答（模式 {result.mode}, 终止原因 {result.termination_reason}）:\n")
-    print(result.answer_text)
-    print()
-    print(f"引用检查: {describe_report(result.citation_report)}")
-    for check in result.citation_report.checks:
-        status = "OK " if check.valid else "BAD"
-        target = f"{check.path}:{check.start_line}-{check.end_line}"
-        print(f"  [{status}] {check.evidence_id}: {target}")
-        if check.url:
-            print(f"        {check.url}")
-        for issue in check.issues:
-            print(f"        ! {issue.code}: {issue.message}")
-    if result.evidence:
-        print("\n证据:")
-        for item in result.evidence:
-            print(f"  [{item.evidence_id}] {item.label}  score={item.score}")
-    if result.notes:
-        print("\n说明:")
-        for note in result.notes:
-            print(f"  - {note}")
-    usage = result.usage
-    print(
-        f"\n耗时: {result.elapsed_ms} ms; "
-        f"usage: {'unavailable' if usage is None else usage.model_dump()}"
-    )
+    _print_result(result)
     return 0
 
 
@@ -354,7 +413,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = ask_cmd.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="使用离线抽取式基线（默认）")
-    mode.add_argument("--llm", action="store_true", help="使用已配置的聊天模型")
+    mode.add_argument("--llm", action="store_true", help="使用已配置的聊天模型（单次回答）")
+    mode.add_argument(
+        "--agent",
+        action="store_true",
+        help="LangGraph 工具循环（search_code/read_file，带预算；需要 --repo-root）",
+    )
+    ask_cmd.add_argument("--max-steps", type=int, default=6, help="Agent 最大步数")
+    ask_cmd.add_argument(
+        "--max-tool-calls", type=int, default=8, help="Agent 最大工具调用次数"
+    )
+    ask_cmd.add_argument(
+        "--max-seconds", type=float, default=60.0, help="Agent 总时限（秒）"
+    )
     ask_cmd.set_defaults(func=_cmd_ask)
 
     probe = sub.add_parser("probe", help="检查环境、配置与在线能力")

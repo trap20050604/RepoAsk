@@ -23,15 +23,27 @@ from repoask.models import (
     content_sha256,
 )
 
-CITATION_RE = re.compile(r"\[(E\d+)\]")
+CITATION_RE = re.compile(r"\[(E\d+)(?::L?(\d+)(?:-L?(\d+))?)?\]")
+
+
+def extract_citations(answer_text: str) -> dict[str, list[tuple[int | None, int | None]]]:
+    """提取引用，支持 ``[E1]``、``[E1:37]``、``[E1:37-42]``、``[E1:L37-L42]``。
+
+    返回 证据 ID → [(起, 止)] 的映射，保留出现顺序。模型经常在引用里直接写行号，
+    只认 ``[E1]`` 会让这些引用悄悄逃过校验（真实运行时发现，已补回归测试）。
+    """
+    found: dict[str, list[tuple[int | None, int | None]]] = {}
+    for match in CITATION_RE.finditer(answer_text or ""):
+        evidence_id = match.group(1)
+        start = int(match.group(2)) if match.group(2) else None
+        end = int(match.group(3)) if match.group(3) else start
+        found.setdefault(evidence_id, []).append((start, end))
+    return found
 
 
 def extract_citation_ids(answer_text: str) -> list[str]:
     """Citation markers in first-appearance order, de-duplicated."""
-    ordered: dict[str, None] = {}
-    for match in CITATION_RE.finditer(answer_text or ""):
-        ordered.setdefault(match.group(1), None)
-    return list(ordered)
+    return list(extract_citations(answer_text))
 
 
 def _issue(code: str, message: str) -> CitationIssue:
@@ -54,7 +66,8 @@ def verify_citations(
     character with the real file, which is what catches stale line numbers.
     """
     by_id = {item.evidence_id: item for item in evidence}
-    cited_ids = extract_citation_ids(answer_text)
+    citations = extract_citations(answer_text)
+    cited_ids = list(citations)
     checks: list[CitationCheck] = []
     unknown_ids: list[str] = []
 
@@ -108,6 +121,26 @@ def verify_citations(
         if item.content_hash != content_sha256(item.content):
             issues.append(_issue("hash_mismatch", "evidence content does not match its hash"))
 
+        # 模型可以在引用里带行号（[E1:37-42]）；必须落在该证据的范围内，
+        # 否则说明它引用了证据之外的行，属于无效引用。
+        cited_start: int | None = None
+        cited_end: int | None = None
+        for start, end in citations[evidence_id]:
+            if start is None:
+                continue
+            end = end if end is not None else start
+            if start < item.start_line or end > item.end_line:
+                issues.append(
+                    _issue(
+                        "line_outside_evidence",
+                        f"cited lines {start}-{end} fall outside evidence "
+                        f"{item.start_line}-{item.end_line}",
+                    )
+                )
+                continue
+            if cited_start is None:
+                cited_start, cited_end = start, end
+
         source_checked = False
         if file_texts is not None and normalized_path is not None:
             text = file_texts.get(normalized_path)
@@ -138,11 +171,14 @@ def verify_citations(
                     else:
                         source_checked = True
 
+        # 引用里给了行号且落在证据范围内时，链接指向更精确的行。
+        checkout_start = cited_start or item.start_line
+        checkout_end = cited_end or item.end_line
         url: str | None = None
         if repo_url and normalized_path is not None:
             try:
                 url = github_blob_url(
-                    repo_url, commit, normalized_path, item.start_line, item.end_line
+                    repo_url, commit, normalized_path, checkout_start, checkout_end
                 )
             except (ValueError, InvalidPath) as exc:
                 issues.append(_issue("cannot_build_url", str(exc)))
@@ -152,8 +188,8 @@ def verify_citations(
                 evidence_id=evidence_id,
                 valid=not issues,
                 path=normalized_path or item.path,
-                start_line=item.start_line,
-                end_line=item.end_line,
+                start_line=checkout_start,
+                end_line=checkout_end,
                 url=url,
                 source_checked=source_checked,
                 issues=issues,

@@ -153,6 +153,49 @@ def test_answer_with_no_evidence_has_nothing_to_check() -> None:
     assert describe_report(report) == "没有引用标记"
 
 
+def test_citation_with_explicit_line_range_is_checked_and_narrows_the_link() -> None:
+    chunk = make_chunk(CONTENT, path=PATH, start_line=37)
+    evidence = make_evidence(chunk)
+    report = verify_citations(
+        "见 [E1:37-38]。",
+        [evidence],
+        repo_id=DEFAULT_REPO_ID,
+        commit=DEFAULT_COMMIT,
+        repo_url=REPO_URL,
+        file_texts=file_text_with(CONTENT, 37),
+    )
+    check = report.checks[0]
+    assert check.valid
+    assert (check.start_line, check.end_line) == (37, 38)
+    assert check.url is not None and "#L37-L38" in check.url
+
+
+def test_citation_with_line_outside_the_evidence_is_rejected() -> None:
+    chunk = make_chunk(CONTENT, path=PATH, start_line=37)
+    report = verify_citations(
+        "见 [E1:99]。",
+        [make_evidence(chunk)],
+        repo_id=DEFAULT_REPO_ID,
+        commit=DEFAULT_COMMIT,
+    )
+    assert not report.all_valid
+    assert {issue.code for issue in report.checks[0].issues} == {"line_outside_evidence"}
+
+
+def test_citation_line_shorthand_forms_are_recognised() -> None:
+    chunk = make_chunk(CONTENT, path=PATH, start_line=37)
+    evidence = make_evidence(chunk)
+    for text in ("[E1:37]", "[E1:L37]", "[E1:37-38]", "[E1:L37-L38]"):
+        report = verify_citations(
+            f"见 {text}。",
+            [evidence],
+            repo_id=DEFAULT_REPO_ID,
+            commit=DEFAULT_COMMIT,
+        )
+        assert report.checked_count == 1, text
+        assert report.all_valid, text
+
+
 def test_github_blob_url_contains_commit_and_line_anchor() -> None:
     url = github_blob_url(REPO_URL, DEFAULT_COMMIT, PATH, 12, 20)
     assert url == (

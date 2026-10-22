@@ -1,14 +1,15 @@
 # 交接单（handoff）
 
-最后更新：2026-10-19（Asia/Shanghai）。
-当前阶段：**阶段 1 完成并处置完独立审查第 1 轮；阶段 2 完成（向量存储 + RRF 混合检索）**。
-下一阶段：阶段 3（LangGraph 工具循环、预算与轨迹）。
+最后更新：2026-10-22（Asia/Shanghai）。
+当前阶段：**阶段 3 完成（LangGraph 工具循环、预算、轨迹）**。阶段 1、2 及两轮独立审查已完成。
+下一阶段：阶段 4（GitHub 导入、FastAPI、Streamlit）。
 
 ## 提交与推送
 
 - 当前提交：以 `git log -1` 为准（本文件随每次提交一起更新）。
-- 阶段 2 起始提交：`9e0c0d6`；增量 1（向量存储）提交：`0eb992a`；增量 2（RRF 混合检索）见本次提交。
-- 审查基线：`35caa13`；审查修复提交：`1015470`（看代码差异用 `git diff 35caa13..1015470`）。
+- 阶段 3 起始提交：`3213734`。
+- 阶段 2 起始提交：`9e0c0d6`；增量 1：`0eb992a`；增量 2：`c989711`；第 2 轮审查修复：`79db0d3`。
+- 审查基线：`35caa13`（第 1 轮）、`c989711`（第 2 轮）；第 1 轮修复提交 `1015470`。
 - 阶段 1 功能提交：`9ee1115`。
 - 推送：全部推送到 `origin/main`。本机到 GitHub 的链路**间歇性中断**（曾出现
   `Connection was reset` / `443 端口连接超时`，而同时刻 `curl https://github.com` 返回 200）。
@@ -22,6 +23,7 @@
 | --- | --- |
 | [`docs/reports/stage-1.md`](reports/stage-1.md) | 阶段 1 + 审查第 1 轮：能力、模块、请求流、取舍与限制、验证、阅读清单、练习 |
 | [`docs/reports/stage-2.md`](reports/stage-2.md) | 阶段 2：向量存储、embedding 元数据、RRF 混合检索、三路对照观察、NO_PROXY 故障处理 |
+| [`docs/reports/stage-3.md`](reports/stage-3.md) | 阶段 3：LangGraph 工具循环、预算与终止原因、轨迹、真实运行与两个缺陷修复 |
 
 `docs/learning-guide.zh-CN.md` 是项目所有者自己维护的学习手册（当前**未纳入版本控制**），
 本项目的文档不重复其内容。
@@ -31,8 +33,8 @@
 - 解释器：`D:\anaconda\envs\trap\python.exe`，Python 3.11.16（Windows 10.0.26100）。
   PATH 上的 `python` 是另一个 3.8 安装，**必须用全路径**。
 - 为项目安装的依赖（未改动其它环境）：
-  `tree-sitter==0.25.2`、`tree-sitter-python==0.25.0`、`qdrant-client==1.19.1`
-  （附带 h2、hpack、hyperframe、portalocker、pywin32）。
+  `tree-sitter==0.25.2`、`tree-sitter-python==0.25.0`、`qdrant-client==1.19.1`、
+  `langgraph==1.2.16`（附带 langgraph-checkpoint 4.3.0、langchain-core 1.6.13 等）。
   注意：`tree-sitter-python` **没有 0.25.1 版本**，镜像上最高 0.25.0。
 - 本机目录权限有两处异常，均已处理或绕过：
   - `E:\RepoAsk` 原先缺少 `WRITE_OWNER`，已为当前用户修复；备份与回滚脚本在
@@ -51,22 +53,24 @@
 | Embedding | `qwen3.7-text-embedding-flash` @ DashScope 兼容接口 | 通过，**1024 维**（与配置一致） |
 | 向量索引构建 | 25 个分块 | `embedding_ms=1182`、`embedding_tokens=1467`、集合名含模型与维度 |
 | Qdrant 本地模式 | `qdrant-client==1.19.1` | 建集合/写入/payload 过滤/重开均通过；本地无 `search()`，用 `query_points`；`create_payload_index` 是 no-op |
+| Agent 工具循环 | `deepseek-chat` + `langgraph==1.2.16` | 2 次模型调用 + 2 次工具调用，3953 ms，3152 tokens，引用 2/2 有效（详见阶段 3 报告） |
 
 ## 测试
 
 ```
-python -m pytest   →   124 passed, 2 skipped in 7.44s
+python -m pytest   →   136 passed, 2 skipped in 7.87s
 ```
 
 | 测试文件 | 用例数 | 覆盖 |
 | --- | --- | --- |
 | `test_python_chunker.py` | 14 | 行号不变式、覆盖完整、装饰器、嵌套、类边界、语法错误恢复、切分、编码与换行 |
 | `test_review_fixes.py` | 18 | 独立审查第 1 轮 8 项缺陷的回归 |
-| `test_citation_verify.py` | 13 | 引用校验各失败分支、URL 构造、输入校验 |
+| `test_citation_verify.py` | 16 | 引用校验各失败分支、URL 构造、行号引用格式与越界拒绝 |
 | `test_vector_store.py` | 11 | 向量写入/检索的版本隔离、维度校验、集合隔离、命中映射、向量/融合证据来源 |
 | `test_ingest_local.py` | 10 | 跳过规则、上限、符号链接、路径越界 |
 | `test_retrieval.py` | 10 | 分词、符号命中、版本隔离、去重、预算、渲染 |
 | `test_llm_client.py` | 9 | 重试、超时、usage 缺失、修正采纳规则（桩，无网络） |
+| `test_agent.py` | 9 | 工具闭环、三类预算、工具错误、参数校验、读文件截断、轨迹（脚本化客户端） |
 | `test_fusion.py` | 8 | RRF 数学、去重合并、排序、权重、空输入、参数校验、来源统计 |
 | `test_review2_fixes.py` | 8 | 独立审查第 2 轮 4 项缺陷的回归（集合撞名/旧点残留/零权重/查询建库） |
 | `test_stage1_end_to_end.py` | 8 | 端到端、版本绑定、轨迹事件、缺配置分支 |
@@ -75,6 +79,14 @@ python -m pytest   →   124 passed, 2 skipped in 7.44s
 | `test_text_chunker.py` | 5 | Markdown 标题/围栏、配置文本、类型分发 |
 
 跳过 2 项均为“创建符号链接需要权限”的自跳过用例，**不算通过的安全检查**。
+
+## 阶段 3 已验证（2026-10-22）
+
+- `ask --agent` 真实运行：2 次模型调用、2 次工具调用、3953 ms、3152 tokens，引用 2/2 有效。
+- 轨迹事件：`index → agent_start → agent_retrieve → agent_model_call → agent_tool_call ×2 →
+  agent_model_call → agent_finalize → agent_done`，`elapsed_ms` 单调递增。
+- 真实运行暴露并修复两个缺陷：① 行号引用格式 `[E6:49]` 未被识别，导致多数引用逃过校验；
+  ② `agent_done` 覆盖轨迹标准耗时列（同阶段 1 的老问题在新模块重现）。两者都有回归测试。
 
 ## 阶段 2 观察记录（不是评测）
 
@@ -152,18 +164,26 @@ python -m pytest   →   124 passed, 2 skipped in 7.44s
 9. 裸 CR 文件的行号与 GitHub 行锚点可能不一致（行尾已归一化为 LF）。
 10. **embedding 非确定性**：同一段代码两次调用返回的向量并非逐位相同（实测余弦分差约 6e-4），
     因此跨运行比较原始分数不可靠；阶段 5 需固定配置并先测重复性。
-11. GitHub 导入、FastAPI、Streamlit、题库与正式评测均未实现。
+11. **Agent 的引用修正不计入步数**：结果里的 `steps` 不含收尾修正那一次模型调用，评测需单独统计。
+12. Agent 证据上限 8 条、`read_file` 单次最多 200 行 / 4000 字符，超出会截断或不再新增证据。
+13. Agent 工具串行执行；没有流式输出、多轮会话记忆与并发。
+14. GitHub 导入、FastAPI、Streamlit、题库与正式评测均未实现。
 
-## 下一步（阶段 3）
+## 下一步（阶段 4）
 
-1. 用 LangGraph 搭最小状态图：`检索 → 判断是否需要补查 → 工具调用 → 回答 → 引用校验`。
-2. 状态至少包含：问题、版本、工具消息、证据、步数、预算、终止原因、答案。
-3. 工具：`search_code`、`read_file`；参数校验、请求超时、有限重试、结果截断、调用次数上限、总时限。
-4. 达到预算必须明确结束（`termination_reason`），不能静默返回空内容；错误要显式返回。
-5. 轨迹记录每一步的工具调用与结果摘要（不记录模型思维链）。
+1. GitHub 导入：`https://github.com/<owner>/<repo>` + 分支/commit；用 `git clone`（已验证可用）
+   或归档下载；把分支解析成固定 commit，索引与查询都绑定该版本。
+2. 导入状态：等待 / 处理中 / 完成 / 失败（含错误原因），限制仓库大小、文件大小与导入时间。
+3. FastAPI：导入、索引状态、提问三类接口；长任务不阻塞普通请求（简单单进程任务管理，
+   并说明重启与并发限制）。
+4. Streamlit：展示答案、引用、证据代码、步骤摘要与耗时。
+5. 复核：GitHub 导入的路径安全（只读克隆目录、符号链接、大小上限）与“不执行目标仓库代码”。
 
 ## 阅读入口
 
+- `repoask/agent/graph.py`：`build_graph`（节点、条件边、预算终止）
+- `repoask/agent/tools.py`：`RepoaskTools.execute`（参数校验、错误显式返回、证据登记）
+- `repoask/agent/runner.py`：`run_agent`（组装、预算、轨迹）
 - `repoask/parse/python_chunker.py`：`chunk_python_source`、`_decorator_group_start`
 - `repoask/pipeline.py`：`build_local_index`、`search_vector`、`ask`
 - `repoask/vector/store.py`：`upsert_chunks`、`search`

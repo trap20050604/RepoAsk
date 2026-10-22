@@ -14,7 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ChunkKind = Literal["function", "method", "nested_function", "class", "text"]
-AnswerMode = Literal["offline_extractive", "llm"]
+AnswerMode = Literal["offline_extractive", "llm", "agent"]
 
 
 def content_sha256(text: str) -> str:

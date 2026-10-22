@@ -20,6 +20,8 @@ from repoask.config import Settings
 from repoask.errors import LLMUnavailable
 from repoask.httpcompat import sanitize_no_proxy
 from repoask.models import Usage
+from repoask.agent.llm import ToolChatResponse
+from repoask.agent.tools import ToolCall, parse_arguments
 
 RETRYABLE_ERROR_NAMES = frozenset(
     {"APITimeoutError", "APIConnectionError", "RateLimitError", "InternalServerError"}
@@ -157,6 +159,61 @@ class ChatClient:
             )
         raise LLMUnavailable(
             f"chat completion failed after {attempts} attempt(s): {last_error}"
+        )
+
+    def complete_with_tools(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.0,
+    ) -> ToolChatResponse:
+        """带 function calling 的一次调用；重试策略与 ``complete`` 相同。"""
+        attempts = self.settings.llm_max_retries + 1
+        last_error: Exception | None = None
+        extra: dict[str, Any] = {}
+        if tools:
+            extra = {"tools": tools, "tool_choice": "auto"}
+        for attempt in range(1, attempts + 1):
+            try:
+                completion = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    **extra,
+                )
+            except Exception as exc:  # noqa: BLE001 - classified below
+                last_error = exc
+                if type(exc).__name__ in RETRYABLE_ERROR_NAMES and attempt < attempts:
+                    time.sleep(min(0.5 * attempt, 2.0))
+                    continue
+                raise LLMUnavailable(
+                    f"tool-calling completion failed after {attempt} attempt(s): "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            choices = getattr(completion, "choices", None) or []
+            message = getattr(choices[0], "message", None) if choices else None
+            raw_calls = getattr(message, "tool_calls", None) if message is not None else None
+            calls = [
+                ToolCall(
+                    id=str(getattr(call, "id", "") or f"call_{index}"),
+                    name=str(getattr(getattr(call, "function", None), "name", "")),
+                    arguments=parse_arguments(
+                        getattr(getattr(call, "function", None), "arguments", "") or "{}"
+                    ),
+                )
+                for index, call in enumerate(raw_calls or [], start=1)
+            ]
+            return ToolChatResponse(
+                text=getattr(message, "content", None) or "",
+                tool_calls=calls,
+                usage=_extract_usage(completion),
+                model=getattr(completion, "model", self.model),
+                finish_reason=_finish_reason(completion),
+                attempts=attempt,
+            )
+        raise LLMUnavailable(
+            f"tool-calling completion failed after {attempts} attempt(s): {last_error}"
         )
 
     # -- capability probe -------------------------------------------------

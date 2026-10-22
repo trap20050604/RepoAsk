@@ -3,8 +3,8 @@
 针对**一个固定 commit** 的公开仓库回答源码级问题，并给出**程序可核验**的引用：
 文件路径、原始行号、绑定该 commit 的 GitHub 链接。
 
-> 当前进度：阶段 1 完成（含独立审查第 1 轮修复）；**阶段 2 完成**（向量索引 + RRF 混合检索）。
-> LangGraph 工具循环、GitHub 导入、FastAPI、Streamlit、正式评测题库尚未实现。
+> 当前进度：阶段 1、2 完成（含两轮独立审查修复）；**阶段 3 完成**（LangGraph 工具循环与预算）。
+> GitHub 导入、FastAPI、Streamlit、正式评测题库尚未实现。
 > 真实验证记录见 [docs/handoff.md](docs/handoff.md)，每阶段交付说明见
 > [docs/reports/](docs/reports/)，稳定设计见 [docs/architecture.md](docs/architecture.md)。
 
@@ -15,11 +15,13 @@
 - **只读导入**：大小/数量/时间上限，符号链接不跟随，二进制与缓存跳过并记录原因；
   脏工作树不会冒用 git HEAD 作为版本。
 - **关键词/符号检索**（BM25）与**向量检索**（Qdrant 本地持久化，集合按模型+维度隔离），
-  两者都强制按 `repo_id + commit` 过滤。
+  两者都强制按 `repo_id + commit` 过滤，并可用 RRF 按排名融合。
 - **预算化上下文**：去重、父级签名、带真实行号渲染，超限按行裁剪并记录。
-- **两种回答模式**：离线抽取式基线（无密钥可测）与 OpenAI 兼容聊天模型。
-- **引用校验**：`[E#]` 映射回证据，检查仓库/commit/路径/行号/内容，并能与真实源码逐字比对。
-- **JSONL 轨迹**：检索、上下文、回答、引用检查、完成事件，凭据字段脱敏。
+- **三种回答模式**：离线抽取式基线（无密钥可测）、单次模型回答、**LangGraph 工具循环**
+  （`search_code` / `read_file`，带步数/工具次数/时限预算与显式终止原因）。
+- **引用校验**：`[E#]` 或 `[E1:37-42]` 映射回证据，检查仓库/commit/路径/行号/内容，
+  并能与真实源码逐字比对。
+- **JSONL 轨迹**：检索、上下文、回答、工具调用、引用检查、完成事件，凭据字段脱敏。
 
 ## 快速开始
 
@@ -53,6 +55,12 @@
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
     --repo-root tests/fixtures/demo_repo --question "..." --llm
 
+# Agent 工具循环（search_code / read_file，带预算；需要 LLM_* 配置）
+& 'D:\anaconda\envs\trap\python.exe' -m repoask.cli ask `
+    --repo-root tests/fixtures/demo_repo --question "load_tasks 是怎么处理空名称的？" `
+    --agent --max-steps 5 --max-tool-calls 5 --max-seconds 60 `
+    --log data/runs/agent.jsonl
+
 # 环境与模型能力自检（不打印密钥）
 & 'D:\anaconda\envs\trap\python.exe' -m repoask.cli probe
 ```
@@ -70,6 +78,7 @@ repoask/
   vector/     Qdrant 本地向量存储
   embed/      embedding 客户端
   answer/     离线基线、OpenAI 兼容客户端
+  agent/      LangGraph 工具循环（状态、工具、图、运行入口）
   cite/       GitHub 链接、引用校验
   index.py    版本绑定索引（JSONL）
   pipeline.py 建索引 / 向量检索 / 提问
@@ -86,6 +95,8 @@ scripts/      检索调试脚本
 - 中文按二元组切词，常见词（如“时间”）可能误命中无关注释；RRF 的 k 与权重未调参。
 - 不做调用图；动态调用与 `getattr` 一律不解析。
 - 模型回答质量未评测，只验证了接口能力（调用/工具调用/流式/usage）。
+- Agent 工具串行执行；证据上限 8 条，`read_file` 单次最多 200 行 / 4000 字符；
+  引用修正不计入 `max_steps` 统计；没有流式与多轮会话记忆。
 - `ask --index` 未给 `--repo-root` 时，引用只证明内部自洽，不会与真实文件比对。
 - 本地 Qdrant 单进程持锁，不支持多进程并发写。
 - 仅支持 Python 源码、README 与常见配置文件；其它类型跳过并记录原因。
